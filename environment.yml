@@ -1,0 +1,18 @@
+name: HCNS
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.13
+  - jupyter
+  - notebook
+  - numpy=2.3
+  - astropy=7.1
+  - pip
+  - matplotlib=3.10
+  - reproject=0.15
+  - photutils=2.3
+  - astroquery=0.4
+  - pandas=2.3
+  - tqdm
+  - scipy=1.16
