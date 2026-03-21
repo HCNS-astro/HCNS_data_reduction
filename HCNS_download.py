@@ -2,6 +2,7 @@ from astroquery.mast import Observations
 from astropy.table import Table
 import os
 import tqdm
+import numpy as np
 
 
 import logging
@@ -22,6 +23,15 @@ data_dir = os.path.abspath(os.path.join(code_dir,'..','data'))
 
 logging.info('Identifying HCNS data in MAST.')
 HCNS_obs = Observations.query_criteria(proposal_id=[18061], obs_collection='HST', obs_title='Hubble Census of Nearby Satellites')
+
+bad_obs_list = np.loadtxt('bad_obs.list',dtype='str')
+drop_inx = []
+for obs_str in bad_obs_list:
+    for i in range(len(HCNS_obs)):
+        if obs_str.lower() in HCNS_obs['dataURL'][i]:
+            drop_inx.append(i)
+if len(drop_inx) > 0:
+    HCNS_obs.remove_rows(drop_inx)
 
 observed_targets = list(set(HCNS_obs['target_name']))
 logging.info(f'Targets observed to date: {", ".join(observed_targets)}')
@@ -46,6 +56,9 @@ for target in tqdm.tqdm(observed_targets):
         for obsid in target_obsids:
             product_list = Observations.get_unique_product_list(str(obsid))
             filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project='CALWF3', productSubGroupDescription='DRC')
+            logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
+            Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
+            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project='CALWF3', productSubGroupDescription='FLC')
             logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
             Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
             filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project='CALWF3', productSubGroupDescription='FLT')
