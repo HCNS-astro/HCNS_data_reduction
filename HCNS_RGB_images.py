@@ -64,7 +64,7 @@ def star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, bl
     sources['mag'] = sources['mag'] - red_header['PHOTZPT']
     sources.sort('mag')
     red_srcs = sources[sources['mag'] > 15.]
-    red_srcs = sources[sources['mag'] < 25.]
+    red_srcs = red_srcs[red_srcs['mag'] < 25.]
     red_coords = pixel_to_skycoord(red_srcs['xcentroid'],red_srcs['ycentroid'],red_wcs)
     red_srcs['ra'] = red_coords.ra.deg
     red_srcs['dec'] = red_coords.dec.deg
@@ -77,7 +77,7 @@ def star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, bl
     sources['mag'] = sources['mag'] - blue_header['PHOTZPT']
     sources.sort('mag')
     blue_srcs = sources[sources['mag'] > 15.]
-    blue_srcs = sources[sources['mag'] < 25.]
+    blue_srcs = blue_srcs[blue_srcs['mag'] < 25.]
     blue_coords = pixel_to_skycoord(blue_srcs['xcentroid'],blue_srcs['ycentroid'],blue_wcs)
     blue_srcs['ra'] = blue_coords.ra.deg
     blue_srcs['dec'] = blue_coords.dec.deg
@@ -137,7 +137,6 @@ reduct_dir = os.path.abspath(os.path.join(code_dir,'..','reduction'))
 paths = glob.glob(os.path.join(data_dir,"*"))
 for path in paths:
     target = str(os.path.split(path)[1])
-    logger.info(f'Making images for {target}.')
     
     target_dir = os.path.join(data_dir,target)
     dolphot_dir = os.path.join(reduct_dir,target)
@@ -145,8 +144,10 @@ for path in paths:
     
     if os.path.isdir(target_out_dir):
         if verbose:
-            logger.info(f'{target_out_dir} already exists.')
+            logger.info(f'{target_out_dir} already exists. Images will not be regenerated.')
+        continue
     else:
+        logger.info(f'Making images for {target}.')
         os.mkdir(target_out_dir)
         logger.info(f'{target_out_dir} created.')
     
