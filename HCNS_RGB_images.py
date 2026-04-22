@@ -142,14 +142,15 @@ for path in paths:
     dolphot_dir = os.path.join(reduct_dir,target)
     target_out_dir = os.path.join(out_dir,target)
     
-    if os.path.isdir(target_out_dir):
+    if os.path.isfile(os.path.join(target_out_dir,f'{target}_RGB.png')):
         if verbose:
-            logger.info(f'{target_out_dir} already exists. Images will not be regenerated.')
+            logger.info(f'Images already exist and will not be regenerated.')
         continue
     else:
         logger.info(f'Making images for {target}.')
-        os.mkdir(target_out_dir)
-        logger.info(f'{target_out_dir} created.')
+        if not os.path.isdir(target_out_dir):
+            os.mkdir(target_out_dir)
+            logger.info(f'{target_out_dir} created.')
     
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     
@@ -217,7 +218,7 @@ for path in paths:
     ax = plt.subplot(projection=red_wcs)
     plt.imshow(red_img, norm=norm, origin='lower', cmap='Greys', aspect='equal')
     plt.axis('off')
-    plt.savefig(os.path.join(target_out_dir,f'{target}_{filters[1]}_greyscale.png'),bbox_inches='tight')
+    plt.savefig(os.path.join(target_out_dir,f'{target}_{filters[1]}_greyscale.png'),bbox_inches='tight',dpi=200)
     logger.info(f'Red image saved to: {target}_{filters[1]}_greyscale.png')
     plt.close()
     
@@ -230,7 +231,7 @@ for path in paths:
     ax = plt.subplot(projection=red_wcs)
     plt.imshow(blue_img, norm=norm, origin='lower', cmap='Greys', aspect='equal')
     plt.axis('off')
-    plt.savefig(os.path.join(target_out_dir,f'{target}_{filters[0]}_greyscale.png'),bbox_inches='tight')
+    plt.savefig(os.path.join(target_out_dir,f'{target}_{filters[0]}_greyscale.png'),bbox_inches='tight',dpi=200)
     logger.info(f'Blue image saved to: {target}_{filters[0]}_greyscale.png')
     plt.close()
     
@@ -255,6 +256,6 @@ for path in paths:
     ax = plt.subplot(projection=red_wcs)
     plt.imshow(RGB_img, origin='lower', aspect='equal')
     plt.axis('off')
-    plt.savefig(os.path.join(target_out_dir,f'{target}_RGB.png'),bbox_inches='tight')
+    plt.savefig(os.path.join(target_out_dir,f'{target}_RGB.png'),bbox_inches='tight',dpi=200)
     logger.info(f'RGB image saved to: {target}_RGB.png')
     plt.close()
