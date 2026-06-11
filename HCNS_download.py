@@ -55,13 +55,13 @@ for target in tqdm.tqdm(observed_targets):
 
         for obsid in target_obsids:
             product_list = Observations.get_unique_product_list(str(obsid))
-            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project='CALWF3', productSubGroupDescription='DRC')
+            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='DRC')
             logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
             Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
-            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project='CALWF3', productSubGroupDescription='FLC')
+            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLC')
             logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
             Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
-            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project='CALWF3', productSubGroupDescription='FLT')
+            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLT')
             logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
             Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
 
