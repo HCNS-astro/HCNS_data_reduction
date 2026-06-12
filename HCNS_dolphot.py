@@ -365,7 +365,7 @@ def generate_fake_stars(target, dolphot_logger, Nfake=200000,
 
     if len(filters) > 1:
         global_logger.info(f'Fake stars will be generated for filters: {filters[0]} and {filters[-1]}.')
-        command = ['fakelist', f'{target}_{instrument.lower()}', f'{instrument.upper()_{filters[0]}', f'instrument.upper()_{filters[-1]}',
+        command = ['fakelist', f'{target}_{instrument.lower()}', f'{instrument.upper()}_{filters[0]}', f'{instrument.upper()}_{filters[-1]}',
                    f'{filt_min}', f'{filt_max}', f'{col_min}', f'{col_max}', f'-nstar={Nfake}']
         #execute_command(command, dolphot_dir, dolphot_logger)
         with open(os.path.join(dolphot_dir,'fakelist.dat'), "w") as f:
