@@ -213,10 +213,7 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
             photpars.write("img{0}_file={1}.chip1\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+1,filename))
             photpars.write("img{0}_file={1}.chip2\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+2,filename))
 
-        if template_file is None:
-            match instrument:
-                case 'WFC3': template_file = 'phot_pars_WFC3_template'
-                case 'ACS': template_file = 'phot_pars_ACS_template'
+        template_file = f'phot_pars_{instrument.upper()}_template'
         temp_photpars = open(template_file)
 
         lines = temp_photpars.readlines()
@@ -376,7 +373,6 @@ def generate_fake_stars(target, dolphot_logger, Nfake=200000,
         global_logger.info(f'Fake stars will be generated for filters: {filters[0]} and {filters[-1]}.')
         command = ['fakelist', f'{target}_{instrument.lower()}', f'{instrument.upper()}_{filters[0]}', f'{instrument.upper()}_{filters[-1]}',
                    f'{filt_min}', f'{filt_max}', f'{col_min}', f'{col_max}', f'-nstar={Nfake}']
-        #execute_command(command, dolphot_dir, dolphot_logger)
         with open(os.path.join(dolphot_dir,'fakelist.dat'), "w") as f:
             subprocess.run(command, cwd=dolphot_dir, stdout=f)
     else:
@@ -426,9 +422,9 @@ def run_dolphot(target, fake_stars=False, verbose=False):
     #Run dolphot
     dolphot_logger.info(f'Running dolphot for {target}.')
     if not fake_stars:
-        command = ["dolphot", f"{target}_wfc3", "-pphot_pars"]
+        command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars"]
     else:
-        command = ["dolphot", f"{target}_wfc3", "-pphot_pars_fake"]
+        command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars_fake"]
     execute_command(command, dolphot_dir, dolphot_logger)
     dolphot_logger.info(f'Dolphot completed for {target}.')
     global_logger.info(f'Dolphot completed for {target}.')
