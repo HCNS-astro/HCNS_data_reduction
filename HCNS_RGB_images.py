@@ -136,6 +136,9 @@ reduct_dir = os.path.abspath(os.path.join(code_dir,'..','reduction'))
 
 paths = glob.glob(os.path.join(data_dir,"*"))
 for path in paths:
+    if 'archival' in str(path):
+        continue
+        
     target = str(os.path.split(path)[1])
     
     target_dir = os.path.join(data_dir,target)
@@ -155,12 +158,27 @@ for path in paths:
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     
     filters = []
-    
+    instrument = None
     for imgpath in drizfilelist:
         hdu = fits.open(imgpath)
-        #header = hdu[0].header
         header = hdu[0].header
-        filtername = header['FILTER']
+        if 'ACS' in header['INSTRUME']:
+            instrument = 'ACS'
+        elif 'WFC3' in header['INSTRUME']:
+            instrument = 'WFC3'
+        else:
+            logger.warning(f'Instrument not set for {target}. Skipping RGB image creation.')
+            continue
+        match instrument:
+            case 'WFC3':
+                filtername = header['FILTER']
+            case 'ACS':
+                if 'CLEAR' not in header['FILTER1']:
+                    filtername = header['FILTER1']
+                elif 'CLEAR' not in header['FILTER2']:
+                    filtername = header['FILTER2']
+                else:
+                    global_logger.error('No filter identified.')
         filters.append(filtername)
         hdu.close()
     filters = list(set(filters))
@@ -176,10 +194,16 @@ for path in paths:
             inx = imgfile.find('.fits')
             rootname = imgfile[:inx]
             hdu = fits.open(imgpath)
-            #header = hdu[0].header
             header = hdu[0].header
-            if filtername in header['FILTER']:
-                filterdrizimg.append(rootname)
+            match instrument:
+                case 'WFC3':
+                    if filtername in header['FILTER']:
+                        filterdrizimg.append(rootname)
+                case 'ACS':
+                    if filtername in header['FILTER1']:
+                        filterdrizimg.append(rootname)
+                    elif filtername in header['FILTER2']:
+                        filterdrizimg.append(rootname)
             hdu.close()
     
     
