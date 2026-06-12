@@ -358,7 +358,16 @@ def generate_fake_stars(target, dolphot_logger, Nfake=200000,
         else:
             global_logger.warning(f'Instrument not set. Fake stars failed for {target}.')
             return None
-        filtername = header['FILTER']
+        match instrument:
+            case 'WFC3':
+                filtername = header['FILTER']
+            case 'ACS':
+                if 'CLEAR' not in header['FILTER1']:
+                    filtername = header['FILTER1']
+                elif 'CLEAR' not in header['FILTER2']:
+                    filtername = header['FILTER2']
+                else:
+                    global_logger.error('No filter identified.')
         filters.append(filtername)
     filters = list(set(filters))
     filters.sort()
