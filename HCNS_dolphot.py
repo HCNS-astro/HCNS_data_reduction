@@ -458,12 +458,12 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
     if fake_stars:
         if (os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")) and
             not os.path.isfile(os.path.join(reduct_dir, target, "fakestars.done"))):
-            tmp = run_dolphot_WFC3(target, fake_stars=True)
+            tmp = run_dolphot(target, fake_stars=True)
     else:
         if not os.path.isfile(os.path.join(reduct_dir, target, "align.done")):
             global_logger.warning(f'Alignment incomplete for {target}. Skipping.')
         elif not os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")):
-            tmp = run_dolphot_WFC3(target)
+            tmp = run_dolphot(target)
 
 
 
