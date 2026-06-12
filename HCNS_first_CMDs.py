@@ -66,8 +66,10 @@ def col_comp_func(col,tran,plat,alpha):
     return numpy.where(col < tran, plat, alpha*col**2 - 2.*alpha*tran*col + plat + alpha*tran**2.)
     
 
-R_F814W = 1.536 # WFC3 values from Schlafly and Finkbeiner (2011)
-R_F606W = 2.488
+R_WFC3_F814W = 1.536 # WFC3 values from Schlafly and Finkbeiner (2011)
+R_WFC3_F606W = 2.488
+R_ACS_F814W =  1.526 # ACS values from Schlafly and Finkbeiner (2011)
+R_ACS_F606W = 2.471 
 R_I = 1.505 # Landolt values from Schlafly and Finkbeiner (2011)
 R_V = 2.742
 
@@ -80,8 +82,21 @@ for path in paths:
     target = str(os.path.split(path)[1])
 
     target_dir = os.path.join(data_dir, target)
-    dolphot_outfile = os.path.join(reduct_dir, target, f'{target}_wfc3') # Hard-coded for WFC3 
-    ast_file = os.path.join(reduct_dir, target, f'{target}_wfc3.fake') # Hard-coded for WFC3 
+    drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
+    instrument = None
+    for imgpath in drizfilelist:
+        hdu = fits.open(imgpath)
+        header = hdu[0].header
+        if 'ACS' in header['INSTRUME']:
+            instrument = 'ACS'
+        elif 'WFC3' in header['INSTRUME']:
+            instrument = 'WFC3'
+        else:
+            global_logger.warning(f'Instrument not set for {target}. Skipping CMD creation.')
+            continue
+    
+    dolphot_outfile = os.path.join(reduct_dir, target, f'{target}_{instrument.lower()}')
+    ast_file = os.path.join(reduct_dir, target, f'{target}_{instrument.lower()}.fake')
 
     if (os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")) and
         not os.path.isfile(os.path.join(out_dir,target,'phot_target_initial.csv'))):
@@ -119,13 +134,20 @@ for path in paths:
 
         # Assume that the reference image is F606W 
         # THIS NEEDS TO BE FIXED
-        drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
         filters = []
         for imgpath in drizfilelist:
             hdu = fits.open(imgpath)
-            #header = hdu[0].header
             header = hdu[0].header
-            filtername = header['FILTER']
+            match instrument:
+                case 'WFC3':
+                    filtername = header['FILTER']
+                case 'ACS':
+                    if 'CLEAR' not in header['FILTER1']:
+                        filtername = header['FILTER1']
+                    elif 'CLEAR' not in header['FILTER2']:
+                        filtername = header['FILTER2']
+                    else:
+                        global_logger.error('No filter identified.')
             filters.append(filtername)
             hdu.close()
         filters = list(set(filters))
@@ -138,8 +160,15 @@ for path in paths:
                 rootname = imgfile[:inx]
                 hdu = fits.open(imgpath)
                 header = hdu[0].header
-                if filtername in header['FILTER']:
-                    filterdrizimg.append(rootname)
+                match instrument:
+                    case 'WFC3':
+                        if filtername in header['FILTER']:
+                            filterdrizimg.append(rootname)
+                    case 'ACS':
+                        if filtername in header['FILTER1']:
+                            filterdrizimg.append(rootname)
+                        elif filtername in header['FILTER2']:
+                            filterdrizimg.append(rootname)
                 hdu.close()
         ref_drc_imgfile = os.path.join(target_dir, filterdrizimg[0]+'.fits')
 
@@ -157,8 +186,13 @@ for path in paths:
         dolphot_cat['ra'] = coords.ra.deg
         dolphot_cat['dec'] = coords.dec.deg
         dolphot_cat['E(B-V)'] = sfd(coords)
-        dolphot_cat['A_F814W'] = dolphot_cat['E(B-V)']*R_F814W
-        dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)']*R_F606W
+        match instrument:
+            case 'ACS':
+                dolphot_cat['A_F814W'] = dolphot_cat['E(B-V)']*R_ACS_F814W
+                dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)']*R_ACS_F606W
+            case 'WFC3':
+                dolphot_cat['A_F814W'] = dolphot_cat['E(B-V)']*R_WFC3_F814W
+                dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)']*R_WFC3_F606W
         dolphot_cat['A_I'] = dolphot_cat['E(B-V)']*R_I
         dolphot_cat['A_V'] = dolphot_cat['E(B-V)']*R_V
         dolphot_cat['F814W_0'] = dolphot_cat[29] - dolphot_cat['A_F814W']
@@ -197,28 +231,31 @@ for path in paths:
         hcns_sample['Name'] = hcns_sample['Name'].str.upper()
         hcns_sample = hcns_sample.set_index('Name')
 
-        target_ra, target_dec, target_re = hcns_sample['RA'][target],hcns_sample['Dec'][target],hcns_sample['r_e_arcsec'][target]
-
-        target_pos = SkyCoord(ra=target_ra*u.deg, dec=target_dec*u.deg)
-
-        dolphot_cat['separation'] = target_pos.separation(coords).arcsec
-        dolphot_cat = dolphot_cat[dolphot_cat['separation'] < 2.*target_re]
-
-        dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
-                                   'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I']]
-        phot_outfile = os.path.join(out_dir,target,'phot_target_initial.csv')
-        global_logger.info(f'Saving initial target photometry catalog to {phot_outfile}.')
-        dolphot_cat.to_csv(phot_outfile,index=False)
-
-        plt.figure(figsize=(4,8))
-        plt.scatter(dolphot_cat['F606W_0']-dolphot_cat['F814W_0'], dolphot_cat['F814W_0'],c='k',s=3,marker='o')
-        plt.ylim(27.5,20)
-        plt.xlim(-0.5,1.5)
-        plt.title(f'{target} (Initial)')
-        plt.xlabel(r'F606W$_0$ - F814W$_0$')
-        plt.ylabel('F814W$_0$')
-        plt.savefig(os.path.join(out_dir,target,'CMD_initial.pdf'),bbox_inches='tight')
-        plt.close()
+        try:
+            target_ra, target_dec, target_re = hcns_sample['RA'][target],hcns_sample['Dec'][target],hcns_sample['r_e_arcsec'][target]
+    
+            target_pos = SkyCoord(ra=target_ra*u.deg, dec=target_dec*u.deg)
+    
+            dolphot_cat['separation'] = target_pos.separation(coords).arcsec
+            dolphot_cat = dolphot_cat[dolphot_cat['separation'] < 2.*target_re]
+    
+            dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
+                                       'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I']]
+            phot_outfile = os.path.join(out_dir,target,'phot_target_initial.csv')
+            global_logger.info(f'Saving initial target photometry catalog to {phot_outfile}.')
+            dolphot_cat.to_csv(phot_outfile,index=False)
+    
+            plt.figure(figsize=(4,8))
+            plt.scatter(dolphot_cat['F606W_0']-dolphot_cat['F814W_0'], dolphot_cat['F814W_0'],c='k',s=3,marker='o')
+            plt.ylim(27.5,20)
+            plt.xlim(-0.5,1.5)
+            plt.title(f'{target} (Initial)')
+            plt.xlabel(r'F606W$_0$ - F814W$_0$')
+            plt.ylabel('F814W$_0$')
+            plt.savefig(os.path.join(out_dir,target,'CMD_initial.pdf'),bbox_inches='tight')
+            plt.close()
+        except:
+            global_logger.warning(f'{target} could not be match to HCNS sample table. No target CMD will be produced.')
 
 
 
