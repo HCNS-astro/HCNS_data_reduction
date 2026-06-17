@@ -354,9 +354,7 @@ for path in paths:
         try:
             aa_transform = star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, blue_wcs)
             registered_blue_img, footprint = astroalign.apply_transform(aa_transform, blue_img, red_img)
-            # NOTE: registered_blue_img (the ICP-aligned image) should be passed to
-            # reproject_adaptive here instead of blue_img; as written the alignment is not applied.
-            blue_img, footprint = reproject_adaptive((blue_img,red_wcs), red_wcs, shape_out=np.shape(red_img))
+            blue_img, footprint = reproject_adaptive((registered_blue_img,red_wcs), red_wcs, shape_out=np.shape(red_img))
         except:
             logger.warning(f"WARNING: Star cloud alignment failed for {target}. Falling back to header WCS.")
             blue_img, footprint = reproject_adaptive((blue_img,blue_wcs), red_wcs, shape_out=np.shape(red_img))

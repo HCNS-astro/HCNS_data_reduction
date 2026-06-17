@@ -349,7 +349,7 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
             command = ["calcsky", f"{filterdrizimg[i]}.chip1", "15", "35", "4", "2.25", "2.00"]
             execute_command(command, dolphot_dir, dolphot_logger)
             for j,filename in enumerate(filterexposures[i]):
-                for chip in range(1,2):  # TODO: range(1,2) only covers chip1; chip2 sky is not computed
+                for chip in range(1,3):
                     command = ["calcsky", f"{filename}.chip{chip}", "15", "35", "4", "2.25", "2.00"]
                     execute_command(command, dolphot_dir, dolphot_logger)
         subprocess.run(["touch", "calcsky.done"], cwd=dolphot_dir)
