@@ -1,3 +1,18 @@
+"""
+Create greyscale and RGB composite images for HCNS survey targets.
+
+For each target, the script reads the drizzled DRC images for both available
+filters, aligns the blue-filter image to the red-filter frame (trying
+astroalign first, then a star-cloud ICP method, then WCS-only reprojection),
+and saves a three-colour composite PNG alongside individual greyscale PNGs.
+
+Outputs (per target, under ``out_dir/<target>/``)
+-------------------------------------------------
+<target>_<blue_filter>_greyscale.png
+<target>_<red_filter>_greyscale.png
+<target>_RGB.png
+HCNS_RGB_images.log
+"""
 import sys, os, glob, shutil, logging, copy
 import numpy as np
 import pandas as pd
@@ -18,9 +33,31 @@ import cv2
 verbose = False
 
 def icp_affine(src_pts, dst_pts, max_iterations=50, tolerance=0.001):
-    """
-    Iterative Closest Point to find an affine transform without known correspondence.
-    (This function was mostly authored by Gemini 3.0 - 2026-03-26)
+    """Estimate an affine transform between two point clouds via ICP.
+
+    Iterative Closest Point algorithm that does not require pre-established
+    point correspondences.  At each iteration, nearest neighbours are found
+    and RANSAC is used to robustly fit the affine transform, so points present
+    in one cloud but not the other do not corrupt the estimate.
+
+    Originally authored with assistance from Gemini 3.0 (2026-03-26).
+
+    Parameters
+    ----------
+    src_pts : numpy.ndarray, shape (N, 2)
+        Source point coordinates (x, y) to be transformed.
+    dst_pts : numpy.ndarray, shape (M, 2)
+        Destination point coordinates (x, y).
+    max_iterations : int, optional
+        Maximum number of ICP iterations.  Default is ``50``.
+    tolerance : float, optional
+        Convergence threshold: stop when the change in mean nearest-neighbour
+        distance falls below this value.  Default is ``0.001``.
+
+    Returns
+    -------
+    skimage.transform.AffineTransform
+        Affine transform mapping ``src_pts`` coordinates to ``dst_pts``.
     """
     src = np.copy(src_pts)
     dst_tree = KDTree(dst_pts)
@@ -55,7 +92,37 @@ def icp_affine(src_pts, dst_pts, max_iterations=50, tolerance=0.001):
     return at_object
 
 def star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, blue_wcs, max_points=50):
+    """Align a blue-filter image to a red-filter image using detected stars.
 
+    Detects point sources in both images with DAOStarFinder, matches them by
+    sky coordinate using the image WCS, removes outliers by separation and
+    colour, then calls ``icp_affine`` to compute the pixel-space affine
+    transform.  Used as a fallback when ``astroalign`` fails.
+
+    Parameters
+    ----------
+    red_img : numpy.ndarray
+        2-D science image array for the red filter.
+    red_header : astropy.io.fits.Header
+        FITS header for the red image; must contain ``'PHOTZPT'``.
+    red_wcs : astropy.wcs.WCS
+        World Coordinate System for the red image.
+    blue_img : numpy.ndarray
+        2-D science image array for the blue filter.
+    blue_header : astropy.io.fits.Header
+        FITS header for the blue image; must contain ``'PHOTZPT'``.
+    blue_wcs : astropy.wcs.WCS
+        World Coordinate System for the blue image.
+    max_points : int, optional
+        Maximum number of matched stars passed to ``icp_affine``.
+        Default is ``50``.
+
+    Returns
+    -------
+    skimage.transform.AffineTransform
+        Affine transform that maps the blue image pixel frame to the red
+        image pixel frame.
+    """
     #Select stars from red image
     mean, median, std = sigma_clipped_stats(red_img, sigma=3.0)
     threshold = 5.0 * std
@@ -105,6 +172,22 @@ def star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, bl
     return affine_trans
 
 def make_logger(name, filename, level=logging.INFO):
+    """Create a logger that writes to both a file and stdout.
+
+    Parameters
+    ----------
+    name : str
+        Name identifier for the logger instance.
+    filename : str
+        Path to the log file (opened in append mode).
+    level : int, optional
+        Logging level threshold; default is ``logging.INFO``.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger with file and console handlers attached.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
@@ -221,15 +304,15 @@ for path in paths:
     hdu = fits.open(imgpath)
     blue_header = hdu[1].header
     blue_img = hdu[1].data
-    blue_img = blue_img.view(blue_img.dtype.newbyteorder()).byteswap()
+    blue_img = blue_img.view(blue_img.dtype.newbyteorder()).byteswap()  # native byte order for astroalign/cv2
     blue_wcs = WCS(blue_header)
     hdu.close()
-    
+
     imgpath = os.path.join(target_dir,filterdrizimg[1]+'.fits')
     hdu = fits.open(imgpath)
     red_header = hdu[1].header
     red_img = hdu[1].data
-    red_img = red_img.view(red_img.dtype.newbyteorder()).byteswap()
+    red_img = red_img.view(red_img.dtype.newbyteorder()).byteswap()  # native byte order for astroalign/cv2
     red_wcs = WCS(red_header)
     hdu.close()
     
@@ -260,6 +343,9 @@ for path in paths:
     plt.close()
     
     
+    # Align the blue image to the red pixel grid using a three-tier fallback:
+    # 1. astroalign (triangle-matching); 2. star-cloud ICP if astroalign raises
+    # MaxIterError; 3. WCS-only reprojection if both alignment methods fail.
     try:
         blue_img, footprint = astroalign.register(blue_img, red_img, detection_sigma=4, min_area=9)
         blue_img, footprint = reproject_adaptive((blue_img,red_wcs), red_wcs, shape_out=np.shape(red_img))
@@ -268,12 +354,15 @@ for path in paths:
         try:
             aa_transform = star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, blue_wcs)
             registered_blue_img, footprint = astroalign.apply_transform(aa_transform, blue_img, red_img)
+            # NOTE: registered_blue_img (the ICP-aligned image) should be passed to
+            # reproject_adaptive here instead of blue_img; as written the alignment is not applied.
             blue_img, footprint = reproject_adaptive((blue_img,red_wcs), red_wcs, shape_out=np.shape(red_img))
         except:
             logger.warning(f"WARNING: Star cloud alignment failed for {target}. Falling back to header WCS.")
             blue_img, footprint = reproject_adaptive((blue_img,blue_wcs), red_wcs, shape_out=np.shape(red_img))
     
     
+    # Green channel synthesised as the average of red and blue since only two science filters are available.
     RGB_img = make_rgb(red_img,0.5*(red_img+blue_img),blue_img, interval=ManualInterval(vmin=0, vmax=0.03))
     
     fig = plt.figure(figsize=(15,15))

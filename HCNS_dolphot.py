@@ -9,6 +9,22 @@ reduct_dir = os.path.abspath(os.path.join(code_dir,'..','reduction'))
 
 
 def make_logger(name, filename, level=logging.INFO):
+    """Create a logger that writes to both a file and stdout.
+
+    Parameters
+    ----------
+    name : str
+        Name identifier for the logger instance.
+    filename : str
+        Path to the log file (opened in append mode).
+    level : int, optional
+        Logging level threshold; default is ``logging.INFO``.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger with file and console handlers attached.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
@@ -30,13 +46,37 @@ def make_logger(name, filename, level=logging.INFO):
     return logger
 
 def close_logger(logger_instance):
+    """Flush and remove all handlers from a logger instance.
+
+    Parameters
+    ----------
+    logger_instance : logging.Logger
+        The logger to shut down.
+    """
     handlers = logger_instance.handlers[:]
     for handler in handlers:
         handler.close()
         logger_instance.removeHandler(handler)
 
 def execute_command(command, exec_dir, logger):
+    """Run a shell command, streaming each output line to the logger.
 
+    stderr is merged into stdout so all output is captured in a single stream.
+
+    Parameters
+    ----------
+    command : list of str
+        Command and arguments, e.g. ``["dolphot", "target_wfc3", "-pphot_pars"]``.
+    exec_dir : str
+        Working directory in which to run the command.
+    logger : logging.Logger
+        Logger used to record each line of command output.
+
+    Returns
+    -------
+    int
+        Return code from the subprocess.
+    """
     logger.info(f'Running command: {" ".join(command)}')
 
     with subprocess.Popen(command, cwd=exec_dir, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1) as process:
@@ -46,7 +86,25 @@ def execute_command(command, exec_dir, logger):
     return process.returncode
 
 def align_dolphot(target, logger, instrument=None):
+    """Run dolphot in alignment-only mode and validate the result.
 
+    Alignment is considered successful if every per-image sigma value is
+    below 0.75 *and* every matched-star count is at least 15.
+
+    Parameters
+    ----------
+    target : str
+        Target identifier (used to construct the dolphot output filename).
+    logger : logging.Logger
+        Logger for dolphot output.
+    instrument : str, optional
+        Instrument name; must contain ``"ACS"`` or ``"WFC3"``.
+
+    Returns
+    -------
+    bool
+        ``True`` if alignment passes all quality checks, ``False`` otherwise.
+    """
     dolphot_dir = os.path.join(reduct_dir,target)
 
     if 'WFC3' in instrument:
@@ -75,15 +133,41 @@ def align_dolphot(target, logger, instrument=None):
             n_stars_align.append(int(line[inx1+9:inx2]))
         sys.stdout.flush()
 
+    # Either condition alone is sufficient to fail: a high sigma indicates a poor
+    # astrometric fit; too few matched stars makes the sigma itself unreliable.
     if numpy.any(numpy.array(sig_values) > 0.75) or numpy.any(numpy.array(n_stars_align) < 15):
-        #Alignment failed
         return False
     else:
-        #Alignment succeeded
         return True
 
 def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=None):
+    """Prepare all files and run the pre-photometry steps for dolphot.
 
+    Steps performed (each guarded by a marker file so they are skipped on
+    re-runs): copy raw FITS files to the reduction directory, write
+    ``phot_pars``, mask detector edges, split multi-chip frames, calculate
+    sky backgrounds, and run alignment with up to three retry attempts.
+
+    Parameters
+    ----------
+    target : str
+        Target identifier (must match a directory under ``data_dir``).
+    CTE : bool, optional
+        If ``True``, use FLT (non-CTE-corrected) exposures and enable
+        ``useCTE`` in the parameter file.  Default is ``False``.
+    align_iter : int, optional
+        ``AlignIter`` value written to ``phot_pars``.  Default is ``5``.
+    verbose : bool, optional
+        Log additional progress messages.  Default is ``False``.
+    template_file : str, optional
+        Unused; reserved for future use.
+
+    Returns
+    -------
+    bool or None
+        ``True`` if alignment succeeded, ``False`` if it failed after all
+        retries, or ``None`` if the instrument could not be identified.
+    """
     if verbose:
         global_logger.info(f'Prepping files for running dolphot on {target}.')
 
@@ -206,9 +290,12 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
         photpars.write(f"Nimg={2*len(numpy.array(filterexposures).flatten())}\n")
         filterwavelengths = []
         for i,filtername in enumerate(filters):
+            # Extract central wavelength in nm from the filter name, e.g. "F814W" -> 814
             filterwavelengths.append(int(filtername[1:4]))
         inx = filterwavelengths.index(min(filterwavelengths))
         photpars.write(f"img0_file={filterdrizimg[inx]}.chip1\n")
+        # Each FLC/FLT exposure occupies two consecutive image slots (chip1 and chip2),
+        # so exposure i maps to img{2i+1} (chip1) and img{2i+2} (chip2).
         for i,filename in enumerate(numpy.array(filterexposures).flatten()):
             photpars.write("img{0}_file={1}.chip1\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+1,filename))
             photpars.write("img{0}_file={1}.chip2\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+2,filename))
@@ -262,7 +349,7 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
             command = ["calcsky", f"{filterdrizimg[i]}.chip1", "15", "35", "4", "2.25", "2.00"]
             execute_command(command, dolphot_dir, dolphot_logger)
             for j,filename in enumerate(filterexposures[i]):
-                for chip in range(1,2):
+                for chip in range(1,2):  # TODO: range(1,2) only covers chip1; chip2 sky is not computed
                     command = ["calcsky", f"{filename}.chip{chip}", "15", "35", "4", "2.25", "2.00"]
                     execute_command(command, dolphot_dir, dolphot_logger)
         subprocess.run(["touch", "calcsky.done"], cwd=dolphot_dir)
@@ -277,6 +364,9 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
             align_attempt += 1
             if not align_success:
                 dolphot_logger.info(f'Alignment attempt {align_attempt} failed.')
+                # Escalation strategy: attempt 1 → Align=3, attempt 2 → Align=4.
+                # On attempt 3, also switch the reference image to the longest-wavelength
+                # filter, which typically has better S/N for red stars near the RGB tip.
                 if align_attempt < 3:
                     dolphot_logger.info('Re-running alignment.')
                     temp_photpars = open(os.path.join(dolphot_dir,'phot_pars'))
@@ -333,9 +423,32 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
 
     return align_success
 
-def generate_fake_stars(target, dolphot_logger, Nfake=200000, 
+def generate_fake_stars(target, dolphot_logger, Nfake=200000,
                         filt_min=20, filt_max=30.5, col_min=-1.0, col_max=2.5):
+    """Generate a fake-star input list for artificial star tests (ASTs).
 
+    Calls the ``fakelist`` utility to write ``fakelist.dat`` in the dolphot
+    reduction directory.  Requires at least two filters so that a meaningful
+    input colour can be defined; uses the shortest and longest wavelength
+    filters available.
+
+    Parameters
+    ----------
+    target : str
+        Target identifier.
+    dolphot_logger : logging.Logger
+        Logger for status messages.
+    Nfake : int, optional
+        Number of fake stars to inject.  Default is ``200000``.
+    filt_min : float, optional
+        Bright magnitude limit for the fake-star distribution.  Default is ``20``.
+    filt_max : float, optional
+        Faint magnitude limit for the fake-star distribution.  Default is ``30.5``.
+    col_min : float, optional
+        Blue colour limit (short minus long wavelength filter).  Default is ``-1.0``.
+    col_max : float, optional
+        Red colour limit.  Default is ``2.5``.
+    """
     dolphot_logger.info(f'Generating fake stars for {target}.')
 
     dolphot_dir = os.path.join(reduct_dir,target)
@@ -381,7 +494,23 @@ def generate_fake_stars(target, dolphot_logger, Nfake=200000,
     return None
 
 def run_dolphot(target, fake_stars=False, verbose=False):
+    """Execute dolphot photometry on an already-prepped target directory.
 
+    Removes the ``AlignOnly`` parameter from ``phot_pars`` before running.
+    When ``fake_stars=True``, writes a separate ``phot_pars_fake`` file that
+    adds fake-star injection parameters, and calls ``generate_fake_stars`` to
+    create the input list.
+
+    Parameters
+    ----------
+    target : str
+        Target identifier.
+    fake_stars : bool, optional
+        If ``True``, run dolphot with artificial star injection for ASTs.
+        Default is ``False``.
+    verbose : bool, optional
+        Unused; reserved for future use.  Default is ``False``.
+    """
     dolphot_dir = os.path.join(reduct_dir,target)
 
     #Open log for dolphot run for this target
@@ -444,7 +573,16 @@ def run_dolphot(target, fake_stars=False, verbose=False):
 
 
 def _prep_dolphot(path):
-    """Worker function for parallel dolphot prep execution."""
+    """Joblib worker: prep dolphot for a single target if not already done.
+
+    Skips silently if ``align.done`` or ``align.failed`` already exists in
+    the target's reduction directory.
+
+    Parameters
+    ----------
+    path : str
+        Full path to the target's raw data directory.
+    """
     target = str(os.path.split(path)[1])
 
     if os.path.isfile(os.path.join(reduct_dir, target, "align.failed")):
@@ -457,7 +595,22 @@ def _prep_dolphot(path):
 
 
 def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
-    """Worker function for parallel dolphot execution."""
+    """Joblib worker: run dolphot on a target only if prerequisites are met.
+
+    For a standard photometry run, requires ``align.done``.  For an AST run
+    (``fake_stars=True``), requires ``dolphot.done`` and the absence of
+    ``fakestars.done``.
+
+    Parameters
+    ----------
+    path : str
+        Full path to the target's raw data directory.
+    reduct_dir : str
+        Root reduction directory containing per-target subdirectories.
+    fake_stars : bool, optional
+        If ``True``, run artificial star tests instead of normal photometry.
+        Default is ``False``.
+    """
     target = str(os.path.split(path)[1])
 
     if fake_stars:

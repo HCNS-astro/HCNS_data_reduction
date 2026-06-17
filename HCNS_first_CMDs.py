@@ -1,3 +1,33 @@
+"""
+Process dolphot photometry output and AST results to produce initial CMDs.
+
+For each target with completed dolphot photometry, this script:
+
+* Reads the dolphot output catalog and applies quality cuts (source type,
+  photometry flags, magnitude, crowding, sharpness).
+* Queries the SFD dust map to compute per-star extinction corrections.
+* Saves a full-field and a target-region (within 2 r_e) photometry catalog.
+* Produces colour–magnitude diagrams as PDF figures.
+
+If AST results are also available, the script fits completeness curves as a
+function of F814W magnitude and F606W–F814W colour and saves the parameters
+to ``completeness.dat``.
+
+Outputs (per target, under ``out_dir/<target>/``)
+-------------------------------------------------
+phot_full.csv
+    Full-field extinction-corrected photometry catalog.
+phot_target_initial.csv
+    Photometry within 2 r_e of the target centre.
+CMD_full.pdf, CMD_initial.pdf
+    Colour–magnitude diagrams.
+phot_ast.csv
+    Recovered fake-star catalog from ASTs.
+completeness.pdf, completeness.dat
+    Completeness limit curves and best-fit model parameters.
+HCNS_first_CMDs.log
+    Run log.
+"""
 import os, sys, glob, numpy, scipy, pandas
 import shutil, subprocess, logging
 from astropy.io import fits
@@ -24,6 +54,22 @@ reduct_dir = os.path.abspath(os.path.join(code_dir,'..','reduction'))
 
 
 def make_logger(name, filename, level=logging.INFO):
+    """Create a logger that writes to both a file and stdout.
+
+    Parameters
+    ----------
+    name : str
+        Name identifier for the logger instance.
+    filename : str
+        Path to the log file (opened in append mode).
+    level : int, optional
+        Logging level threshold; default is ``logging.INFO``.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger with file and console handlers attached.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
@@ -45,6 +91,13 @@ def make_logger(name, filename, level=logging.INFO):
     return logger
 
 def close_logger(logger_instance):
+    """Flush and remove all handlers from a logger instance.
+
+    Parameters
+    ----------
+    logger_instance : logging.Logger
+        The logger to shut down.
+    """
     handlers = logger_instance.handlers[:]
     for handler in handlers:
         handler.close()
@@ -53,16 +106,71 @@ def close_logger(logger_instance):
 
 global_logger = make_logger("global", filename="HCNS_first_CMDs.log")
 
-def comp_func(x,x50,wid):
+def comp_func(x, x50, wid):
+    """Complementary error function model for photometric completeness.
 
+    Returns the fraction of stars recovered at magnitude ``x``, modelled as a
+    smoothed step function that falls from 1 at bright magnitudes to 0 at
+    faint magnitudes.
+
+    Parameters
+    ----------
+    x : float or array-like
+        Magnitude(s) at which to evaluate completeness.
+    x50 : float
+        50% completeness magnitude (mid-point of the transition).
+    wid : float
+        Width parameter controlling the steepness of the transition.
+
+    Returns
+    -------
+    float or numpy.ndarray
+        Completeness fraction in the range [0, 1].
+    """
     return 0.5*(1.-scipy.special.erf((x-x50)/(wid*numpy.sqrt(2.))))
 
-def inv_comp_func(c,x50,wid):
+def inv_comp_func(c, x50, wid):
+    """Inverse of ``comp_func``: convert a completeness fraction to a magnitude.
 
+    Parameters
+    ----------
+    c : float or array-like
+        Completeness fraction(s) in the range (0, 1).
+    x50 : float
+        50% completeness magnitude.
+    wid : float
+        Width parameter of the completeness model.
+
+    Returns
+    -------
+    float or numpy.ndarray
+        Magnitude(s) corresponding to completeness fraction ``c``.
+    """
     return x50 + wid*numpy.sqrt(2.)*scipy.special.erfinv(1.-2.*c)
 
-def col_comp_func(col,tran,plat,alpha):
+def col_comp_func(col, tran, plat, alpha):
+    """Piecewise completeness-limit model as a function of stellar colour.
 
+    Below the transition colour ``tran`` the limit is constant at ``plat``.
+    Above ``tran`` it rises quadratically, modelling the increasing difficulty
+    of detecting red stars against a redder sky background.
+
+    Parameters
+    ----------
+    col : float or array-like
+        Colour value(s) (e.g. F606W − F814W).
+    tran : float
+        Transition colour below which the limit is flat.
+    plat : float
+        Constant completeness-limit magnitude for ``col < tran``.
+    alpha : float
+        Quadratic coefficient governing the rise above ``tran``.
+
+    Returns
+    -------
+    float or numpy.ndarray
+        Completeness-limit magnitude as a function of colour.
+    """
     return numpy.where(col < tran, plat, alpha*col**2 - 2.*alpha*tran*col + plat + alpha*tran**2.)
     
 
@@ -179,8 +287,9 @@ for path in paths:
 
         #Calculate extinction corrections
         sfd = SFDQuery()
-        coords = pixel_to_skycoord(numpy.array(dolphot_cat[2])-0.5, numpy.array(dolphot_cat[3])-0.5, ref_WCS) 
-        # Dolphots pixel coordinates are offset by 0.5 pixels
+        # Dolphot reports 1-indexed pixel coordinates offset by +0.5 relative to the
+        # standard 0-indexed FITS convention; subtract 0.5 to recover the correct position.
+        coords = pixel_to_skycoord(numpy.array(dolphot_cat[2])-0.5, numpy.array(dolphot_cat[3])-0.5, ref_WCS)
         dolphot_cat['x'] = numpy.array(dolphot_cat[2])-0.5
         dolphot_cat['y'] = numpy.array(dolphot_cat[3])-0.5
         dolphot_cat['ra'] = coords.ra.deg
@@ -265,7 +374,13 @@ for path in paths:
         # Now create file for fake stars
         fake_stars = pandas.read_csv(ast_file, sep=r'\s+', header=None)
 
-        Nimages= 8 ##### THIS SHOULD NOT BE HARD CODED!!!
+        # TODO: Nimages is hard-coded for 4 exposures × 2 chips. The column offsets
+        # c1–c4 below depend on this value and will be wrong if the number of images changes.
+        Nimages= 8
+        # Column offsets derived from the dolphot fake-star output format:
+        # c1: start of the second filter's global photometry block
+        # c2: start of the per-source summary columns (chi, snr, sharp, etc.)
+        # c3/c4: per-filter individual photometry columns for filter 1 and filter 2
         c1 = 5 + Nimages
         c2 = c1 + Nimages + 3
         c3 = c2 + 6 + 5 + 1
@@ -347,6 +462,8 @@ for path in paths:
         fit90 = scipy.optimize.curve_fit(col_comp_func,colbins[:-1]+0.5*colwid,C90,p0=[0.8,26.5,0.])
         global_logger.info(f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
 
+        # 50% completeness varies nearly linearly with colour over this range, so a
+        # simple linear model is used rather than the piecewise model applied to 90%.
         fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b,colbins[:-1]+0.5*colwid,C50,p0=[1,30])
         global_logger.info(f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
 

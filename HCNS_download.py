@@ -1,3 +1,25 @@
+"""
+Download HST science data for the HCNS survey (proposal 18061) from MAST.
+
+For each observed target, three product types are downloaded from the CALWF3
+and CALACS pipelines:
+
+* **DRC** – drizzle-combined mosaic, used as the dolphot reference image.
+* **FLC** – CTE-corrected individual exposures, used for dolphot photometry.
+* **FLT** – flat-fielded individual exposures, used when CTE correction is
+  not applied (see ``CTE`` flag in ``HCNS_dolphot.py``).
+
+Observations listed in ``bad_obs.list`` are excluded before downloading.
+Targets whose directory already exists under ``data_dir`` are skipped; delete
+or rename the directory to trigger a re-download.
+
+Outputs
+-------
+<data_dir>/<target>/
+    Downloaded FITS files, one directory per target.
+HCNS_download.log
+    Log of all download activity.
+"""
 from astroquery.mast import Observations
 from astropy.table import Table
 import os
@@ -25,6 +47,8 @@ logging.info('Identifying HCNS data in MAST.')
 HCNS_obs = Observations.query_criteria(proposal_id=[18061], obs_collection='HST', obs_title='Hubble Census of Nearby Satellites')
 
 bad_obs_list = np.loadtxt('bad_obs.list',dtype='str')
+# Remove flagged observations before deduplicating targets so that no data
+# from bad visits is downloaded, even if the target itself is otherwise valid.
 drop_inx = []
 for obs_str in bad_obs_list:
     for i in range(len(HCNS_obs)):
@@ -55,12 +79,15 @@ for target in tqdm.tqdm(observed_targets):
 
         for obsid in target_obsids:
             product_list = Observations.get_unique_product_list(str(obsid))
+            # DRC: drizzle-combined mosaic (reference image for dolphot)
             filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='DRC')
             logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
-            Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
+            Observations.download_products(filtered_products, download_dir=target_dir, flat=True)  # flat=True places files directly in target_dir
+            # FLC: CTE-corrected individual exposures
             filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLC')
             logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
             Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
+            # FLT: flat-fielded individual exposures (no CTE correction)
             filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLT')
             logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
             Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
