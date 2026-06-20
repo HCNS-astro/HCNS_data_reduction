@@ -16,5 +16,7 @@ dependencies:
   - pandas
   - tqdm
   - scipy
+  - joblib
   - pip:
     - opencv-python
+    - dustmaps
