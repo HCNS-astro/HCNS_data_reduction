@@ -221,27 +221,26 @@ for path in paths:
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Remove sources with bad photometry flags.")
-        condition = (dolphot_cat[24] < 4) & (dolphot_cat[37] < 4)
+        condition = (dolphot_cat[23] < 4) & (dolphot_cat[36] < 4)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: mag < {max_mag} (in all filters)")
-        condition = (dolphot_cat[16] < max_mag) & (dolphot_cat[29] < max_mag)
+        condition = (dolphot_cat[15] < max_mag) & (dolphot_cat[28] < max_mag)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: crowding < {crowd_thresh} mag")
-        condition = (dolphot_cat[23] + dolphot_cat[36] < crowd_thresh)
+        condition = (dolphot_cat[22] + dolphot_cat[35] < crowd_thresh)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: sharpness squared < {max_sharp}")
-        condition = ((dolphot_cat[21] + dolphot_cat[34])**2. < max_sharp)
+        condition = ((dolphot_cat[20] + dolphot_cat[33])**2. < max_sharp)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
-        # Assume that the reference image is F606W 
-        # THIS NEEDS TO BE FIXED
+        
         filters = []
         for imgpath in drizfilelist:
             hdu = fits.open(imgpath)
@@ -278,7 +277,9 @@ for path in paths:
                         elif filtername in header['FILTER2']:
                             filterdrizimg.append(rootname)
                 hdu.close()
-        ref_drc_imgfile = os.path.join(target_dir, filterdrizimg[0]+'.fits')
+        # Assume that the reference image is F814W 
+        # THIS NEEDS TO BE FIXED
+        ref_drc_imgfile = os.path.join(target_dir, filterdrizimg[1]+'.fits')
 
         # Get reference WCS from DRC image header
         global_logger.info(f'Opening reference WCS from {ref_drc_imgfile}.fits.')
@@ -304,12 +305,12 @@ for path in paths:
                 dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)']*R_WFC3_F606W
         dolphot_cat['A_I'] = dolphot_cat['E(B-V)']*R_I
         dolphot_cat['A_V'] = dolphot_cat['E(B-V)']*R_V
-        dolphot_cat['F814W_0'] = dolphot_cat[29] - dolphot_cat['A_F814W']
-        dolphot_cat['F606W_0'] = dolphot_cat[16] - dolphot_cat['A_F606W']
-        dolphot_cat['I_0'] = dolphot_cat[30] - dolphot_cat['A_I']
-        dolphot_cat['V_0'] = dolphot_cat[17] - dolphot_cat['A_V']
-        dolphot_cat['e_F814W'] = dolphot_cat[31]
-        dolphot_cat['e_F606W'] = dolphot_cat[18]
+        dolphot_cat['F814W_0'] = dolphot_cat[28] - dolphot_cat['A_F814W']
+        dolphot_cat['F606W_0'] = dolphot_cat[15] - dolphot_cat['A_F606W']
+        dolphot_cat['I_0'] = dolphot_cat[29] - dolphot_cat['A_I']
+        dolphot_cat['V_0'] = dolphot_cat[16] - dolphot_cat['A_V']
+        dolphot_cat['e_F814W'] = dolphot_cat[30]
+        dolphot_cat['e_F606W'] = dolphot_cat[17]
 
         dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
                                    'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I']]
