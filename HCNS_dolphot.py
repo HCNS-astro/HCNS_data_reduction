@@ -292,7 +292,7 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
         for i,filtername in enumerate(filters):
             # Extract central wavelength in nm from the filter name, e.g. "F814W" -> 814
             filterwavelengths.append(int(filtername[1:4]))
-        inx = filterwavelengths.index(min(filterwavelengths))
+        inx = filterwavelengths.index(max(filterwavelengths))
         photpars.write(f"img0_file={filterdrizimg[inx]}.chip1\n")
         # Each FLC/FLT exposure occupies two consecutive image slots (chip1 and chip2),
         # so exposure i maps to img{2i+1} (chip1) and img{2i+2} (chip2).
@@ -346,11 +346,11 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
     if not os.path.isfile(os.path.join(dolphot_dir, "calcsky.done")):
         dolphot_logger.info(f'Running calcsky for {target}.')
         for i,filtername in enumerate(filters):
-            command = ["calcsky", f"{filterdrizimg[i]}.chip1", "15", "35", "4", "2.25", "2.00"]
+            command = ["calcsky", f"{filterdrizimg[i]}.chip1", "15", "35", "-128", "2.25", "2.00"]
             execute_command(command, dolphot_dir, dolphot_logger)
             for j,filename in enumerate(filterexposures[i]):
                 for chip in range(1,3):
-                    command = ["calcsky", f"{filename}.chip{chip}", "15", "35", "4", "2.25", "2.00"]
+                    command = ["calcsky", f"{filename}.chip{chip}", "15", "35", "-128", "2.25", "2.00"]
                     execute_command(command, dolphot_dir, dolphot_logger)
         subprocess.run(["touch", "calcsky.done"], cwd=dolphot_dir)
 
@@ -380,10 +380,10 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
                             break
                     match align_attempt:
                         case 1:
-                            photpars.write("Align = 3\nRotate = 1\nUseWCS = 1\nAlignOnly = 1\n")
+                            photpars.write("Align = 3\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
                             photpars.close() 
                         case 2:
-                            photpars.write("Align = 4\nRotate = 1\nUseWCS = 1\nAlignOnly = 1\n")
+                            photpars.write("Align = 4\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
                             photpars.close() 
                     dolphot_logger.info('Updated alignment parameters in phot_pars.')
                 elif align_attempt == 3:
@@ -395,13 +395,13 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
                     for line in lines:
                         if 'img0_file' in line:
                             #Switch which image is used as reference
-                            inx = filterwavelengths.index(max(filterwavelengths))
+                            inx = filterwavelengths.index(min(filterwavelengths))
                             photpars.write(f"img0_file={filterdrizimg[inx]}.chip1\n")
                         elif 'Align = ' not in line:
                             photpars.write(line)
                         else:
                             break
-                    photpars.write("Align = 3\nRotate = 1\nUseWCS = 1\nAlignOnly = 1\n")
+                    photpars.write("Align = 2\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
                     photpars.close()
                 else:
                     break
@@ -650,9 +650,9 @@ Parallel(n_jobs=N_CPU)(
 )
 
 #Run ASTs
-global_logger.info(f'Running ASTs for all available targets.')
+#global_logger.info(f'Running ASTs for all available targets.')
 
-Parallel(n_jobs=N_CPU)(
-    delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True)
-    for path in paths
-)
+#Parallel(n_jobs=N_CPU)(
+#    delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True)
+#    for path in paths
+#)
