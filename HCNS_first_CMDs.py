@@ -311,9 +311,13 @@ for path in paths:
         dolphot_cat['V_0'] = dolphot_cat[16] - dolphot_cat['A_V']
         dolphot_cat['e_F814W'] = dolphot_cat[30]
         dolphot_cat['e_F606W'] = dolphot_cat[17]
+        dolphot_cat['SNR'] = dolphot_cat[5]
+        dolphot_cat['SNR_F606W'] = dolphot_cat[19]
+        dolphot_cat['SNR_F814W'] = dolphot_cat[32]
 
         dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
-                                   'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I']]
+                                   'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I',
+                                   'SNR','SNR_F606W','SNR_F814W']]
         phot_outfile = os.path.join(out_dir,target,'phot_full.csv')
         global_logger.info(f'Saving full FoV photometry catalog to {phot_outfile}.')
         dolphot_cat.to_csv(phot_outfile,index=False)
@@ -350,7 +354,8 @@ for path in paths:
             dolphot_cat = dolphot_cat[dolphot_cat['separation'] < 2.*target_re]
     
             dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
-                                       'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I']]
+                                       'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I',
+                                       'SNR','SNR_F606W','SNR_F814W']]
             phot_outfile = os.path.join(out_dir,target,'phot_target_initial.csv')
             global_logger.info(f'Saving initial target photometry catalog to {phot_outfile}.')
             dolphot_cat.to_csv(phot_outfile,index=False)
@@ -386,13 +391,13 @@ for path in paths:
         c2 = c1 + Nimages + 3
         c3 = c2 + 6 + 5 + 1
         c4 = c3 + 8 + 5
-        fake_stars = fake_stars.rename(columns={2:'x', 3:'y', 5:'F606W_in', c1:'F814W_in', c2:'chi', c2+1:'snr',
+        fake_stars = fake_stars.rename(columns={2:'x', 3:'y', 5:'F606W_in', c1:'F814W_in', c2:'chi', c2+1:'SNR',
                                                 c2+3:'sharpness', c2+4:'roundness', c2+5:'pa', c2+6:'crowding', c2+7:'type',
                                                 c3:'F606W_out', c3+1:'V_out', c3+2:'err_F606W_out', c3+3:'chi_F606W',
-                                                c3+4:'snr_F606W', c3+5:'sharpness_F606W', c3+6:'roundness_F606W',
+                                                c3+4:'SNR_F606W', c3+5:'sharpness_F606W', c3+6:'roundness_F606W',
                                                 c3+7:'crowding_F606W', c3+8:'flag_F606W',
                                                 c4:'F814W_out', c4+1:'I_out', c4+2:'err_F814W_out', c4+3:'chi_F814W',
-                                                c4+4:'snr_F814W', c4+5:'sharpness_F814W', c4+6:'roundness_F814W',
+                                                c4+4:'SNR_F814W', c4+5:'sharpness_F814W', c4+6:'roundness_F814W',
                                                 c4+7:'crowding_F814W', c4+8:'flag_F814W'})
 
         fake_stars['F606W-F814W'] = fake_stars['F606W_in']-fake_stars['F814W_in']
@@ -410,7 +415,7 @@ for path in paths:
         fake_stars['x'] = numpy.array(fake_stars['x'])-0.5
         fake_stars['y'] = numpy.array(fake_stars['y'])-0.5
         fake_stars = fake_stars[['x','y','F606W_in','F814W_in','F606W_out','F814W_out',
-                                 'err_F606W_out','err_F814W_out','recovered']]
+                                 'err_F606W_out','err_F814W_out','SNR','SNR_F606W','SNR_F814W','recovered']]
         ast_outfile = os.path.join(out_dir,target,'phot_ast.csv')
         global_logger.info(f'Saving AST photometry catalog to {ast_outfile}.')
         fake_stars.to_csv(ast_outfile,index=False)
