@@ -206,8 +206,8 @@ for path in paths:
     dolphot_outfile = os.path.join(reduct_dir, target, f'{target}_{instrument.lower()}')
     ast_file = os.path.join(reduct_dir, target, f'{target}_{instrument.lower()}.fake')
 
-    if (os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")) and
-        not os.path.isfile(os.path.join(out_dir,target,'phot_target_initial.csv'))):
+    if (os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done"))):
+        #and not os.path.isfile(os.path.join(out_dir,target,'phot_target_initial.csv'))):
 
         dolphot_cat = pandas.read_csv(dolphot_outfile, sep=r'\s+', header=None)
 
@@ -220,10 +220,10 @@ for path in paths:
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
-        global_logger.info(f"Remove sources with bad photometry flags.")
-        condition = (dolphot_cat[23] < 4) & (dolphot_cat[36] < 4)
-        dolphot_cat = dolphot_cat[condition]
-        global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
+        #global_logger.info(f"Remove sources with bad photometry flags.")
+        #condition = (dolphot_cat[23] < 4) & (dolphot_cat[36] < 4)
+        #dolphot_cat = dolphot_cat[condition]
+        #global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: mag < {max_mag} (in all filters)")
         condition = (dolphot_cat[15] < max_mag) & (dolphot_cat[28] < max_mag)
