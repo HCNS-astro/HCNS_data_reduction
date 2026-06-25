@@ -374,25 +374,27 @@ for path in paths:
 
 
 
-    if (os.path.isfile(os.path.join(reduct_dir, target, "fakestars.done"))  and
-        not os.path.isfile(os.path.join(out_dir,target,'phot_ast.csv'))):
+    if (os.path.isfile(os.path.join(reduct_dir, target, "fakestars.done"))): 
+        #and not os.path.isfile(os.path.join(out_dir,target,'phot_ast.csv'))):
 
         # Now create file for fake stars
         fake_stars = pandas.read_csv(ast_file, sep=r'\s+', header=None)
 
         # TODO: Nimages is hard-coded for 4 exposures × 2 chips. The column offsets
         # c1–c4 below depend on this value and will be wrong if the number of images changes.
-        Nimages= 8
+        Nimages = 8
         # Column offsets derived from the dolphot fake-star output format:
         # c1: start of the second filter's global photometry block
         # c2: start of the per-source summary columns (chi, snr, sharp, etc.)
         # c3/c4: per-filter individual photometry columns for filter 1 and filter 2
         c1 = 5 + Nimages
         c2 = c1 + Nimages + 3
-        c3 = c2 + 6 + 5 + 1
+        c3 = c2 + 6 + 5
+        #For later versions of dolphot the sharpness, roundness, pa, crowding and type indices
+        #need to be increased by 1
         c4 = c3 + 8 + 5
         fake_stars = fake_stars.rename(columns={2:'x', 3:'y', 5:'F606W_in', c1:'F814W_in', c2:'chi', c2+1:'SNR',
-                                                c2+3:'sharpness', c2+4:'roundness', c2+5:'pa', c2+6:'crowding', c2+7:'type',
+                                                c2+2:'sharpness', c2+3:'roundness', c2+4:'pa', c2+5:'crowding', c2+6:'type',
                                                 c3:'F606W_out', c3+1:'V_out', c3+2:'err_F606W_out', c3+3:'chi_F606W',
                                                 c3+4:'SNR_F606W', c3+5:'sharpness_F606W', c3+6:'roundness_F606W',
                                                 c3+7:'crowding_F606W', c3+8:'flag_F606W',
@@ -415,7 +417,7 @@ for path in paths:
         fake_stars['x'] = numpy.array(fake_stars['x'])-0.5
         fake_stars['y'] = numpy.array(fake_stars['y'])-0.5
         fake_stars = fake_stars[['x','y','F606W_in','F814W_in','F606W_out','F814W_out',
-                                 'err_F606W_out','err_F814W_out','SNR','SNR_F606W','SNR_F814W','recovered']]
+                                 'SNR','SNR_F606W','SNR_F814W','recovered']]
         ast_outfile = os.path.join(out_dir,target,'phot_ast.csv')
         global_logger.info(f'Saving AST photometry catalog to {ast_outfile}.')
         fake_stars.to_csv(ast_outfile,index=False)
@@ -454,32 +456,40 @@ for path in paths:
             comp = comp/cnts
 
             inx = numpy.where(comp > 0.4)[0]
+            
+            try:
+                erf_fit = scipy.optimize.curve_fit(comp_func,m_bins[inx]+0.05,comp[inx],p0=[26.5,0.5],
+                                                   sigma=1./numpy.sqrt(cnts[inx]),bounds=[[24.,0.1],[28.,3.]])
 
-            erf_fit = scipy.optimize.curve_fit(comp_func,m_bins[inx]+0.05,comp[inx],p0=[26.5,0.5],
-                                               sigma=1./numpy.sqrt(cnts[inx]),bounds=[[24.,0.1],[28.,3.]])
+                comp90 = inv_comp_func(0.9,erf_fit[0][0],erf_fit[0][1])
 
-            comp90 = inv_comp_func(0.9,erf_fit[0][0],erf_fit[0][1])
+                comp50 = erf_fit[0][0]
 
-            comp50 = erf_fit[0][0]
+                C90[c] = comp90
+                C50[c] = comp50
+            except ValueError:
+                C90[c] = numpy.nan
+                C50[c] = numpy.nan
 
-            C90[c] = comp90
-            C50[c] = comp50
+        try:        
+            fit90 = scipy.optimize.curve_fit(col_comp_func,colbins[:-1]+0.5*colwid,C90,p0=[0.8,26.5,0.])
+            global_logger.info(f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
 
-        fit90 = scipy.optimize.curve_fit(col_comp_func,colbins[:-1]+0.5*colwid,C90,p0=[0.8,26.5,0.])
-        global_logger.info(f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
+            # 50% completeness varies nearly linearly with colour over this range, so a
+            # simple linear model is used rather than the piecewise model applied to 90%.
+            fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b,colbins[:-1]+0.5*colwid,C50,p0=[1,30])
+            global_logger.info(f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
 
-        # 50% completeness varies nearly linearly with colour over this range, so a
-        # simple linear model is used rather than the piecewise model applied to 90%.
-        fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b,colbins[:-1]+0.5*colwid,C50,p0=[1,30])
-        global_logger.info(f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
+            with open(os.path.join(out_dir,target,'completeness.dat'), 'w') as f:
+                f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
+                f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
 
-        with open(os.path.join(out_dir,target,'completeness.dat'), 'w') as f:
-            f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
-            f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
-
-        x_tmp = numpy.arange(-1.,2.0,0.01)
-        plt.plot(x_tmp,col_comp_func(x_tmp,fit90[0][0],fit90[0][1],fit90[0][2]))
-        plt.plot(x_tmp,fit50[0][0]*x_tmp + fit50[0][1])
+            x_tmp = numpy.arange(-1.,2.0,0.01)
+            plt.plot(x_tmp,col_comp_func(x_tmp,fit90[0][0],fit90[0][1],fit90[0][2]))
+            plt.plot(x_tmp,fit50[0][0]*x_tmp + fit50[0][1])
+        except ValueError:
+            global_logger.warning(f'Completeness limit fit failed for {target}.')
+        
         plt.scatter(colbins[:-1]+0.5*colwid,C90)
         plt.scatter(colbins[:-1]+0.5*colwid,C50)
         plt.ylim(29,24)
