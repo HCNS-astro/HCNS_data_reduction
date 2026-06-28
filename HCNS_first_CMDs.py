@@ -209,6 +209,19 @@ if os.path.isdir(archival_reduct_base):
 for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     os.makedirs(os.path.join(eff_out_dir, target), exist_ok=True)
     target_dir = os.path.join(eff_data_dir, target)
+    phot_pars_file = os.path.join(eff_reduct_dir, target, 'phot_pars')
+    Nimages = None
+    ref_rootname = None
+    if os.path.isfile(phot_pars_file):
+        with open(phot_pars_file) as f:
+            for line in f:
+                if line.startswith('Nimg='):
+                    Nimages = int(line.strip().split('=', 1)[1])
+                elif line.startswith('img0_file='):
+                    val = line.strip().split('=', 1)[1].strip()
+                    ref_rootname = val.rsplit('.chip', 1)[0]
+    else:
+        global_logger.warning(f'phot_pars not found for {target}. Falling back to Nimages=8 and F814W reference.')
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     instrument = None
     for imgpath in drizfilelist:
@@ -290,9 +303,11 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
                         elif filtername in header['FILTER2']:
                             filterdrizimg.append(rootname)
                 hdu.close()
-        # Assume that the reference image is F814W 
-        # THIS NEEDS TO BE FIXED
-        ref_drc_imgfile = os.path.join(target_dir, filterdrizimg[1]+'.fits')
+        if ref_rootname is not None:
+            ref_drc_imgfile = os.path.join(target_dir, ref_rootname+'.fits')
+        else:
+            global_logger.warning(f'Could not read img0_file from phot_pars for {target}. Falling back to filterdrizimg[1].')
+            ref_drc_imgfile = os.path.join(target_dir, filterdrizimg[1]+'.fits')
 
         # Get reference WCS from DRC image header
         global_logger.info(f'Opening reference WCS from {ref_drc_imgfile}.fits.')
@@ -393,9 +408,9 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         # Now create file for fake stars
         fake_stars = pandas.read_csv(ast_file, sep=r'\s+', header=None)
 
-        # TODO: Nimages is hard-coded for 4 exposures × 2 chips. The column offsets
-        # c1–c4 below depend on this value and will be wrong if the number of images changes.
-        Nimages = 8
+        if Nimages is None:
+            global_logger.warning(f'Could not read Nimg from phot_pars for {target}. Falling back to Nimages=8.')
+            Nimages = 8
         # Column offsets derived from the dolphot fake-star output format:
         # c1: start of the second filter's global photometry block
         # c2: start of the per-source summary columns (chi, snr, sharp, etc.)
