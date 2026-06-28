@@ -225,12 +225,11 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     dolphot_outfile = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}')
     ast_file = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}.fake')
 
-    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done"))):
-        #and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_target_initial.csv'))):
+    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")) and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_target_initial.csv'))):
 
         dolphot_cat = pandas.read_csv(dolphot_outfile, sep=r'\s+', header=None)
 
-        # All column IDs are hard-coded for WFC3 with two filters
+        # All column IDs are hard-coded for ACS/WFC3 with two filters
         global_logger.info(f"Generating CMDs for {target}.")
         global_logger.info(f"Total dolphot catalog length: {len(dolphot_cat)}")
 
@@ -238,11 +237,6 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         condition = (dolphot_cat[10] < 3)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
-
-        #global_logger.info(f"Remove sources with bad photometry flags.")
-        #condition = (dolphot_cat[23] < 4) & (dolphot_cat[36] < 4)
-        #dolphot_cat = dolphot_cat[condition]
-        #global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: mag < {max_mag} (in all filters)")
         condition = (dolphot_cat[15] < max_mag) & (dolphot_cat[28] < max_mag)
