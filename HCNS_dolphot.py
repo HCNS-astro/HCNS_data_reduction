@@ -1,11 +1,21 @@
-import os, sys, glob, numpy
+import os, sys, glob, numpy, argparse
 import shutil, subprocess, logging
 from astropy.io import fits
 from joblib import Parallel, delayed
 
 code_dir = os.getcwd()
-data_dir = os.path.abspath(os.path.join(code_dir,'..','data'))
-reduct_dir = os.path.abspath(os.path.join(code_dir,'..','reduction'))
+
+parser = argparse.ArgumentParser(description='Run dolphot on HCNS or archival data.')
+parser.add_argument('--archival', action='store_true',
+                    help='Process all archival data found under ../data/archival/.')
+args = parser.parse_args()
+
+if args.archival:
+    data_dir   = os.path.abspath(os.path.join(code_dir, '..', 'data', 'archival'))
+    reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction', 'archival'))
+else:
+    data_dir   = os.path.abspath(os.path.join(code_dir, '..', 'data'))
+    reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction'))
 
 
 def make_logger(name, filename, level=logging.INFO):
@@ -627,32 +637,51 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
 
 
 #Execute functions
-global_logger = make_logger("global", filename="HCNS_dolphot.log")
+global_logger = make_logger("global", filename="HCNS_dolphot_archival.log" if args.archival else "HCNS_dolphot.log")
 
 N_CPU = 3
 CTE = True
 
-#Prep dolphot
-global_logger.info(f'Running dolphot prep for all downloaded targets.')
-paths = glob.glob(os.path.join(data_dir, "*"))
+if args.archival:
+    # Iterate over program subdirectories (e.g. SNAP-17797) sequentially.
+    # prefer='threads' is used so that worker threads share this process's
+    # globals; updating data_dir/reduct_dir per program is then safe.
+    prog_dirs = sorted(d for d in glob.glob(os.path.join(data_dir, '*')) if os.path.isdir(d))
+    for prog_dir in prog_dirs:
+        prog_id = os.path.basename(prog_dir)
+        global_logger.info(f'Processing archival program {prog_id}.')
+        data_dir   = prog_dir
+        reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction', 'archival', prog_id))
+        os.makedirs(reduct_dir, exist_ok=True)
+        paths = glob.glob(os.path.join(data_dir, '*'))
+        global_logger.info(f'Running dolphot prep for {prog_id}.')
+        Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_prep_dolphot)(path) for path in paths)
+        global_logger.info(f'Running dolphot for {prog_id}.')
+        Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False) for path in paths)
+        global_logger.info(f'Running ASTs for {prog_id}.')
+        Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True) for path in paths)
+else:
+    #Prep dolphot
+    global_logger.info(f'Running dolphot prep for all downloaded targets.')
+    paths = glob.glob(os.path.join(data_dir, "*"))
 
-Parallel(n_jobs=N_CPU)(
-    delayed(_prep_dolphot)(path)
-    for path in paths
-)
+    Parallel(n_jobs=N_CPU)(
+        delayed(_prep_dolphot)(path)
+        for path in paths
+    )
 
-#Run dolphot
-global_logger.info(f'Running dolphot for all downloaded targets.')
+    #Run dolphot
+    global_logger.info(f'Running dolphot for all downloaded targets.')
 
-Parallel(n_jobs=N_CPU)(
-    delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False)
-    for path in paths
-)
+    Parallel(n_jobs=N_CPU)(
+        delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False)
+        for path in paths
+    )
 
-#Run ASTs
-#global_logger.info(f'Running ASTs for all available targets.')
+    #Run ASTs
+    global_logger.info(f'Running ASTs for all available targets.')
 
-#Parallel(n_jobs=N_CPU)(
-#    delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True)
-#    for path in paths
-#)
+    Parallel(n_jobs=N_CPU)(
+        delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True)
+        for path in paths
+    )
