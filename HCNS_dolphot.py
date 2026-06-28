@@ -324,7 +324,7 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
         else:
             photpars.write(f"{instrument.upper()}useCTE = 0\n")
         photpars.write(f"AlignIter={align_iter}\n")
-        photpars.write("Align = 2\nRotate = 1\nUseWCS = 1\nAlignOnly = 1\n")
+        photpars.write("Align = 2\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
         photpars.close() 
         global_logger.info(f'Created photpars file for {target}.')
 
@@ -639,7 +639,7 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
 #Execute functions
 global_logger = make_logger("global", filename="HCNS_dolphot_archival.log" if args.archival else "HCNS_dolphot.log")
 
-N_CPU = 3
+N_CPU = 10
 CTE = True
 
 if args.archival:
