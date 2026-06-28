@@ -185,11 +185,30 @@ max_mag = 30.
 max_sharp = 0.1
 crowd_thresh = 1.0
 
-paths = glob.glob(os.path.join(data_dir,"*"))
-for path in paths:
-    target = str(os.path.split(path)[1])
+# HCNS targets -- exclude the 'archival' subdirectory
+all_targets = [(data_dir, reduct_dir, out_dir, os.path.basename(p))
+               for p in glob.glob(os.path.join(data_dir, '*'))
+               if os.path.isdir(p) and os.path.basename(p) != 'archival']
 
-    target_dir = os.path.join(data_dir, target)
+# Archival targets -- scan reduction/archival/<prog>/<target> for reduced data
+archival_data_base   = os.path.abspath(os.path.join(code_dir, '..', 'data',      'archival'))
+archival_reduct_base = os.path.abspath(os.path.join(code_dir, '..', 'reduction', 'archival'))
+archival_out_base    = os.path.abspath(os.path.join(code_dir, '..', 'output',    'archival'))
+if os.path.isdir(archival_reduct_base):
+    for prog_dir in sorted(glob.glob(os.path.join(archival_reduct_base, '*'))):
+        prog_id = os.path.basename(prog_dir)
+        for target_path in sorted(glob.glob(os.path.join(prog_dir, '*'))):
+            if os.path.isdir(target_path):
+                all_targets.append((
+                    os.path.join(archival_data_base, prog_id),
+                    prog_dir,
+                    os.path.join(archival_out_base, prog_id),
+                    os.path.basename(target_path),
+                ))
+
+for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
+    os.makedirs(os.path.join(eff_out_dir, target), exist_ok=True)
+    target_dir = os.path.join(eff_data_dir, target)
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     instrument = None
     for imgpath in drizfilelist:
@@ -203,11 +222,11 @@ for path in paths:
             global_logger.warning(f'Instrument not set for {target}. Skipping CMD creation.')
             continue
     
-    dolphot_outfile = os.path.join(reduct_dir, target, f'{target}_{instrument.lower()}')
-    ast_file = os.path.join(reduct_dir, target, f'{target}_{instrument.lower()}.fake')
+    dolphot_outfile = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}')
+    ast_file = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}.fake')
 
-    if (os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done"))):
-        #and not os.path.isfile(os.path.join(out_dir,target,'phot_target_initial.csv'))):
+    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done"))):
+        #and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_target_initial.csv'))):
 
         dolphot_cat = pandas.read_csv(dolphot_outfile, sep=r'\s+', header=None)
 
@@ -318,7 +337,7 @@ for path in paths:
         dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
                                    'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I',
                                    'SNR','SNR_F606W','SNR_F814W']]
-        phot_outfile = os.path.join(out_dir,target,'phot_full.csv')
+        phot_outfile = os.path.join(eff_out_dir,target,'phot_full.csv')
         global_logger.info(f'Saving full FoV photometry catalog to {phot_outfile}.')
         dolphot_cat.to_csv(phot_outfile,index=False)
 
@@ -330,7 +349,7 @@ for path in paths:
         plt.title(f'{target} Full Field')
         plt.xlabel(r'F606W$_0$ - F814W$_0$')
         plt.ylabel('F814W$_0$')
-        plt.savefig(os.path.join(out_dir,target,'CMD_full.pdf'),bbox_inches='tight')
+        plt.savefig(os.path.join(eff_out_dir,target,'CMD_full.pdf'),bbox_inches='tight')
         plt.close()
 
 
@@ -356,7 +375,7 @@ for path in paths:
             dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
                                        'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I',
                                        'SNR','SNR_F606W','SNR_F814W']]
-            phot_outfile = os.path.join(out_dir,target,'phot_target_initial.csv')
+            phot_outfile = os.path.join(eff_out_dir,target,'phot_target_initial.csv')
             global_logger.info(f'Saving initial target photometry catalog to {phot_outfile}.')
             dolphot_cat.to_csv(phot_outfile,index=False)
     
@@ -367,15 +386,15 @@ for path in paths:
             plt.title(f'{target} (Initial)')
             plt.xlabel(r'F606W$_0$ - F814W$_0$')
             plt.ylabel('F814W$_0$')
-            plt.savefig(os.path.join(out_dir,target,'CMD_initial.pdf'),bbox_inches='tight')
+            plt.savefig(os.path.join(eff_out_dir,target,'CMD_initial.pdf'),bbox_inches='tight')
             plt.close()
         except:
             global_logger.warning(f'{target} could not be match to HCNS sample table. No target CMD will be produced.')
 
 
 
-    if (os.path.isfile(os.path.join(reduct_dir, target, "fakestars.done"))): 
-        #and not os.path.isfile(os.path.join(out_dir,target,'phot_ast.csv'))):
+    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "fakestars.done"))): 
+        #and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_ast.csv'))):
 
         # Now create file for fake stars
         fake_stars = pandas.read_csv(ast_file, sep=r'\s+', header=None)
@@ -418,7 +437,7 @@ for path in paths:
         fake_stars['y'] = numpy.array(fake_stars['y'])-0.5
         fake_stars = fake_stars[['x','y','F606W_in','F814W_in','F606W_out','F814W_out',
                                  'SNR','SNR_F606W','SNR_F814W','recovered']]
-        ast_outfile = os.path.join(out_dir,target,'phot_ast.csv')
+        ast_outfile = os.path.join(eff_out_dir,target,'phot_ast.csv')
         global_logger.info(f'Saving AST photometry catalog to {ast_outfile}.')
         fake_stars.to_csv(ast_outfile,index=False)
 
@@ -480,7 +499,7 @@ for path in paths:
             fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b,colbins[:-1]+0.5*colwid,C50,p0=[1,30])
             global_logger.info(f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
 
-            with open(os.path.join(out_dir,target,'completeness.dat'), 'w') as f:
+            with open(os.path.join(eff_out_dir,target,'completeness.dat'), 'w') as f:
                 f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
                 f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
 
@@ -495,10 +514,10 @@ for path in paths:
         plt.ylim(29,24)
         plt.ylabel('F814W')
         plt.xlabel('F606W-F814W')
-        plt.savefig(os.path.join(out_dir,target,'completeness.pdf'),bbox_inches='tight')
+        plt.savefig(os.path.join(eff_out_dir,target,'completeness.pdf'),bbox_inches='tight')
         plt.close()
 
-    elif not os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")):
+    elif not os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")):
         global_logger.info(f'Photometry for {target} incomplete. Skipping.')
     else:
         continue
