@@ -402,8 +402,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
 
 
 
-    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "fakestars.done"))): 
-        #and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_ast.csv'))):
+    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "fakestars.done")) and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_ast.csv'))):
 
         # Now create file for fake stars
         fake_stars = pandas.read_csv(ast_file, sep=r'\s+', header=None)
