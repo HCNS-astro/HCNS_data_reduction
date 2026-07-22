@@ -214,19 +214,29 @@ logger = make_logger("RGB_images", filename="HCNS_RGB_images.log")
 code_dir = os.getcwd()
 data_dir = os.path.abspath(os.path.join(code_dir,'..','data'))
 out_dir = os.path.abspath(os.path.join(code_dir,'..','output'))
-reduct_dir = os.path.abspath(os.path.join(code_dir,'..','reduction'))
 
 
-paths = glob.glob(os.path.join(data_dir,"*"))
-for path in paths:
-    if 'archival' in str(path):
-        continue
-        
-    target = str(os.path.split(path)[1])
-    
-    target_dir = os.path.join(data_dir,target)
-    dolphot_dir = os.path.join(reduct_dir,target)
-    target_out_dir = os.path.join(out_dir,target)
+# HCNS targets -- exclude the 'archival' subdirectory
+all_targets = [(data_dir, out_dir, os.path.basename(p))
+               for p in glob.glob(os.path.join(data_dir, '*'))
+               if os.path.isdir(p) and os.path.basename(p) != 'archival']
+
+# Archival targets -- scan data/archival/<prog>/<target> for DRC files
+archival_data_base = os.path.abspath(os.path.join(code_dir, '..', 'data',   'archival'))
+archival_out_base  = os.path.abspath(os.path.join(code_dir, '..', 'output', 'archival'))
+for prog_dir in sorted(glob.glob(os.path.join(archival_data_base, '*'))):
+    prog_id = os.path.basename(prog_dir)
+    for target_path in sorted(glob.glob(os.path.join(prog_dir, '*'))):
+        if os.path.isdir(target_path):
+            all_targets.append((
+                prog_dir,
+                os.path.join(archival_out_base, prog_id),
+                os.path.basename(target_path),
+            ))
+
+for eff_data_dir, eff_out_dir, target in all_targets:
+    target_dir = os.path.join(eff_data_dir,target)
+    target_out_dir = os.path.join(eff_out_dir,target)
     
     if os.path.isfile(os.path.join(target_out_dir,f'{target}_RGB.png')):
         if verbose:
@@ -234,9 +244,7 @@ for path in paths:
         continue
     else:
         logger.info(f'Making images for {target}.')
-        if not os.path.isdir(target_out_dir):
-            os.mkdir(target_out_dir)
-            logger.info(f'{target_out_dir} created.')
+        os.makedirs(target_out_dir, exist_ok=True)
     
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     
