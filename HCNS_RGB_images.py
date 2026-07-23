@@ -298,14 +298,13 @@ for eff_data_dir, eff_out_dir, target in all_targets:
             hdu.close()
     
     
-    if len(filters) <= 1:
-        logger.error('An RGB image cannot be made with fewer than 2 filters.')
-        logger.info(f'Skipping {target}.')
-    if len(filters) == 2:
-        logger.info(f'Filters for RGB image will be: {filters[1]}, {filters[0]}+{filters[1]}, {filters[0]}')
-    else:
-        logger.error('More than two filters is not currently supported.')
-        logger.info(f'Skipping {target}.')
+    if len(filters) < 2:
+        logger.warning(f'{target} has data in fewer than 2 filters ({len(filters)} found). Skipping RGB image creation.')
+        continue
+    if len(filters) > 2:
+        logger.warning(f'{target} has data in more than 2 filters ({len(filters)} found). RGB image creation not supported. Skipping.')
+        continue
+    logger.info(f'Filters for RGB image will be: {filters[1]}, {filters[0]}+{filters[1]}, {filters[0]}')
     
     
     imgpath = os.path.join(target_dir,filterdrizimg[0]+'.fits')

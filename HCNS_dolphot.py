@@ -250,6 +250,9 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
         filters.append(filtername)
     filters = list(set(filters))
     filters.sort()
+    if len(filters) < 2:
+        global_logger.warning(f'{target} has data in fewer than 2 filters ({len(filters)} found). Skipping dolphot prep.')
+        return None
     if verbose:
         global_logger.info(f'Filters found for {target}: {", ".join(filters)}')
 
