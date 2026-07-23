@@ -10,8 +10,9 @@ and CALACS pipelines:
   not applied (see ``CTE`` flag in ``HCNS_dolphot.py``).
 
 Observations listed in ``bad_obs.list`` are excluded before downloading.
-Targets whose directory already exists under ``data_dir`` are skipped; delete
-or rename the directory to trigger a re-download.
+Individual files that have already been downloaded are skipped automatically
+by ``astroquery``; new files for an existing target will be fetched on
+subsequent runs.
 
 Outputs
 -------
@@ -66,29 +67,25 @@ for target in tqdm.tqdm(observed_targets):
     logging.info(f'Target: {target}')
     target_dir = os.path.join(data_dir,target)
 
-    if os.path.isdir(target_dir):
-        logging.info(f'{target_dir} already exists.')
-        logging.warning(f'{target} will be skipped.')
-        logging.info('If you wish to re-download these data, you must first rename or delete this directory.')
-    else:
+    if not os.path.isdir(target_dir):
         os.mkdir(target_dir)
         logging.info(f'{target_dir} created.')
 
-        target_obs = HCNS_obs[HCNS_obs['target_name'] == str(target)]
-        target_obsids = list(set(target_obs['obsid']))
+    target_obs = HCNS_obs[HCNS_obs['target_name'] == str(target)]
+    target_obsids = list(set(target_obs['obsid']))
 
-        for obsid in target_obsids:
-            product_list = Observations.get_unique_product_list(str(obsid))
-            # DRC: drizzle-combined mosaic (reference image for dolphot)
-            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='DRC')
-            logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
-            Observations.download_products(filtered_products, download_dir=target_dir, flat=True)  # flat=True places files directly in target_dir
-            # FLC: CTE-corrected individual exposures
-            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLC')
-            logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
-            Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
-            # FLT: flat-fielded individual exposures (no CTE correction)
-            filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLT')
-            logging.info(f'Downloading {", ".join(list(filtered_products['productFilename']))}')
-            Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
+    for obsid in target_obsids:
+        product_list = Observations.get_unique_product_list(str(obsid))
+        # DRC: drizzle-combined mosaic (reference image for dolphot)
+        filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='DRC')
+        logging.info(f'Downloading {", ".join(list(filtered_products["productFilename"]))}')
+        Observations.download_products(filtered_products, download_dir=target_dir, flat=True)  # flat=True places files directly in target_dir
+        # FLC: CTE-corrected individual exposures
+        filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLC')
+        logging.info(f'Downloading {", ".join(list(filtered_products["productFilename"]))}')
+        Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
+        # FLT: flat-fielded individual exposures (no CTE correction)
+        filtered_products = Observations.filter_products(product_list, productType='SCIENCE', project=['CALWF3','CALACS'], productSubGroupDescription='FLT')
+        logging.info(f'Downloading {", ".join(list(filtered_products["productFilename"]))}')
+        Observations.download_products(filtered_products, download_dir=target_dir, flat=True)
 
