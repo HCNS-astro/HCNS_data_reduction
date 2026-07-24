@@ -585,6 +585,20 @@ def run_dolphot(target, fake_stars=False, verbose=False):
     
 
 
+def _check_stale(path, reduct_dir):
+    """Log a warning if any input data file is newer than dolphot.done."""
+    target = os.path.basename(path)
+    done_file = os.path.join(reduct_dir, target, "dolphot.done")
+    if os.path.isfile(done_file):
+        done_mtime = os.path.getmtime(done_file)
+        data_files = glob.glob(os.path.join(path, '*.fits'))
+        if data_files and max(os.path.getmtime(f) for f in data_files) > done_mtime:
+            global_logger.warning(
+                f'{target}: input data files are newer than dolphot.done. '
+                f'Delete dolphot.done and align.done to trigger a re-run.'
+            )
+
+
 def _prep_dolphot(path):
     """Joblib worker: prep dolphot for a single target if not already done.
 
@@ -635,14 +649,6 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
             global_logger.warning(f'Alignment incomplete for {target}. Skipping.')
         elif not os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")):
             tmp = run_dolphot(target)
-        else:
-            done_mtime = os.path.getmtime(os.path.join(reduct_dir, target, "dolphot.done"))
-            data_files = glob.glob(os.path.join(path, '*.fits'))
-            if data_files and max(os.path.getmtime(f) for f in data_files) > done_mtime:
-                global_logger.warning(
-                    f'{target}: input data files are newer than dolphot.done. '
-                    f'Delete dolphot.done and align.done to trigger a re-run.'
-                )
 
 
 
@@ -668,6 +674,8 @@ if args.archival:
         global_logger.info(f'Running dolphot prep for {prog_id}.')
         Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_prep_dolphot)(path) for path in paths)
         global_logger.info(f'Running dolphot for {prog_id}.')
+        for path in paths:
+            _check_stale(path, reduct_dir)
         Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False) for path in paths)
         global_logger.info(f'Running ASTs for {prog_id}.')
         Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True) for path in paths)
@@ -684,6 +692,8 @@ else:
     #Run dolphot
     global_logger.info(f'Running dolphot for all downloaded targets.')
 
+    for path in paths:
+        _check_stale(path, reduct_dir)
     Parallel(n_jobs=N_CPU)(
         delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False)
         for path in paths

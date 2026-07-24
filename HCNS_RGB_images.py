@@ -239,6 +239,13 @@ for eff_data_dir, eff_out_dir, target in all_targets:
     target_out_dir = os.path.join(eff_out_dir,target)
     
     if os.path.isfile(os.path.join(target_out_dir,f'{target}_RGB.png')):
+        rgb_mtime = os.path.getmtime(os.path.join(target_out_dir, f'{target}_RGB.png'))
+        data_files = glob.glob(os.path.join(target_dir, '*.fits'))
+        if data_files and max(os.path.getmtime(f) for f in data_files) > rgb_mtime:
+            logger.warning(
+                f'{target}: input data files are newer than {target}_RGB.png. '
+                f'Delete the output files to trigger regeneration.'
+            )
         if verbose:
             logger.info(f'Images already exist and will not be regenerated.')
         continue
