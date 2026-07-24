@@ -635,6 +635,14 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
             global_logger.warning(f'Alignment incomplete for {target}. Skipping.')
         elif not os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")):
             tmp = run_dolphot(target)
+        else:
+            done_mtime = os.path.getmtime(os.path.join(reduct_dir, target, "dolphot.done"))
+            data_files = glob.glob(os.path.join(path, '*.fits'))
+            if data_files and max(os.path.getmtime(f) for f in data_files) > done_mtime:
+                global_logger.warning(
+                    f'{target}: input data files are newer than dolphot.done. '
+                    f'Delete dolphot.done and align.done to trigger a re-run.'
+                )
 
 
 
