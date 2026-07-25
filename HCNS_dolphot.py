@@ -682,7 +682,8 @@ if args.archival:
 else:
     #Prep dolphot
     global_logger.info(f'Running dolphot prep for all downloaded targets.')
-    paths = glob.glob(os.path.join(data_dir, "*"))
+    paths = [p for p in glob.glob(os.path.join(data_dir, "*"))
+             if os.path.isdir(p) and os.path.basename(p) != 'archival']
 
     Parallel(n_jobs=N_CPU)(
         delayed(_prep_dolphot)(path)
