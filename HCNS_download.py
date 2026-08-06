@@ -24,6 +24,8 @@ HCNS_download.log
 from astroquery.mast import Observations
 from astropy.table import Table
 import os
+import signal
+import sys
 import tqdm
 import numpy as np
 
@@ -62,8 +64,26 @@ observed_targets = list(set(HCNS_obs['target_name']))
 logging.info(f'Targets observed to date: {", ".join(observed_targets)}')
 
 
+_stop_after_target = False
+
+def _request_stop(signum, frame):
+    global _stop_after_target
+    if not _stop_after_target:
+        _stop_after_target = True
+        logging.info('Shutdown requested by user (Ctrl+C).')
+        tqdm.tqdm.write('\nCtrl+C received — will stop after current target finishes.')
+        tqdm.tqdm.write('Press Ctrl+C again to force quit.')
+    else:
+        logging.warning('Forced quit by user.')
+        sys.exit(1)
+
+signal.signal(signal.SIGINT, _request_stop)
+
 logging.info('Starting data download.')
 for target in tqdm.tqdm(observed_targets):
+    if _stop_after_target:
+        logging.info('Download stopped by user. Remaining targets skipped.')
+        break
     logging.info(f'Target: {target}')
     target_dir = os.path.join(data_dir,target)
 
