@@ -573,8 +573,12 @@ def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
     dolphot_logger.info(f'Running dolphot for {target}.')
     if not fake_stars:
         command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars"]
-    else:
+    elif iteration is None:
         command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars_fake"]
+    else:
+        # Use an iteration-suffixed base name so dolphot writes directly to
+        # {target}_{instr}_{NN}.fake, leaving the original .fake untouched.
+        command = ["dolphot", f"{target}_{instrument.lower()}_{iteration:02d}", "-pphot_pars_fake"]
     execute_command(command, dolphot_dir, dolphot_logger)
     dolphot_logger.info(f'Dolphot completed for {target}.')
     global_logger.info(f'Dolphot completed for {target}.')
@@ -583,9 +587,6 @@ def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
     elif iteration is None:
         subprocess.run(["touch", "fakestars.done"], cwd=dolphot_dir)
     else:
-        fake_out = os.path.join(dolphot_dir, f"{target}_{instrument.lower()}.fake")
-        os.rename(fake_out,
-                  os.path.join(dolphot_dir, f"{target}_{instrument.lower()}_{iteration:02d}.fake"))
         subprocess.run(["touch", f"fakestars_{iteration:02d}.done"], cwd=dolphot_dir)
 
     #Close logger
@@ -669,7 +670,8 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
 def _run_extra_ast_if_ready(path, reduct_dir, iteration):
     """Joblib worker: run one additional AST iteration if prerequisites are met.
 
-    Requires ``dolphot.done`` and ``fakestars.done`` (original AST run complete).
+    Requires ``dolphot.done``.  If the standard AST (``fakestars.done``) has
+    not yet run, it is run first before proceeding with the extra iteration.
     Skips silently if ``fakestars_{iteration:02d}.done`` already exists.
 
     Parameters
@@ -684,9 +686,14 @@ def _run_extra_ast_if_ready(path, reduct_dir, iteration):
     """
     target = os.path.basename(path)
     target_dir = os.path.join(reduct_dir, target)
-    if (os.path.isfile(os.path.join(target_dir, "dolphot.done")) and
-            os.path.isfile(os.path.join(target_dir, "fakestars.done")) and
-            not os.path.isfile(os.path.join(target_dir, f"fakestars_{iteration:02d}.done"))):
+
+    if not os.path.isfile(os.path.join(target_dir, "dolphot.done")):
+        return  # real photometry not complete; skip
+
+    if not os.path.isfile(os.path.join(target_dir, "fakestars.done")):
+        run_dolphot(target, fake_stars=True)
+
+    if not os.path.isfile(os.path.join(target_dir, f"fakestars_{iteration:02d}.done")):
         run_dolphot(target, fake_stars=True, iteration=iteration)
 
 
