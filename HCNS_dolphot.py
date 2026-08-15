@@ -583,7 +583,13 @@ def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
         command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars"]
     else:
         command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars_fake"]
-    execute_command(command, dolphot_dir, dolphot_logger)
+    rc = execute_command(command, dolphot_dir, dolphot_logger)
+    if rc != 0:
+        dolphot_logger.error(
+            f'Dolphot exited with return code {rc} for {target}. '
+            f'No .done file written.')
+        global_logger.error(f'Dolphot exited with return code {rc} for {target}.')
+        return None
     dolphot_logger.info(f'Dolphot completed for {target}.')
     global_logger.info(f'Dolphot completed for {target}.')
     if not fake_stars:
