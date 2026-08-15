@@ -8,6 +8,10 @@ code_dir = os.getcwd()
 parser = argparse.ArgumentParser(description='Run dolphot on HCNS or archival data.')
 parser.add_argument('--archival', action='store_true',
                     help='Process all archival data found under ../data/archival/.')
+parser.add_argument('--ast', action='store_true',
+                    help='Run 9 additional AST iterations per target, '
+                         'saving each with a _01 ... _09 suffix. '
+                         'Requires the standard AST run to have completed first.')
 args = parser.parse_args()
 
 if args.archival:
@@ -506,7 +510,7 @@ def generate_fake_stars(target, dolphot_logger, Nfake=200000,
 
     return None
 
-def run_dolphot(target, fake_stars=False, verbose=False):
+def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
     """Execute dolphot photometry on an already-prepped target directory.
 
     Removes the ``AlignOnly`` parameter from ``phot_pars`` before running.
@@ -523,6 +527,10 @@ def run_dolphot(target, fake_stars=False, verbose=False):
         Default is ``False``.
     verbose : bool, optional
         Unused; reserved for future use.  Default is ``False``.
+    iteration : int or None, optional
+        When not ``None``, renames the ``.fake`` output file with a two-digit
+        suffix (e.g. ``_01``) and touches ``fakestars_NN.done`` instead of
+        ``fakestars.done``.  Used by ``--ast`` mode.  Default is ``None``.
     """
     dolphot_dir = os.path.join(reduct_dir,target)
 
@@ -572,8 +580,13 @@ def run_dolphot(target, fake_stars=False, verbose=False):
     global_logger.info(f'Dolphot completed for {target}.')
     if not fake_stars:
         subprocess.run(["touch", "dolphot.done"], cwd=dolphot_dir)
-    else:
+    elif iteration is None:
         subprocess.run(["touch", "fakestars.done"], cwd=dolphot_dir)
+    else:
+        fake_out = os.path.join(dolphot_dir, f"{target}_{instrument.lower()}.fake")
+        os.rename(fake_out,
+                  os.path.join(dolphot_dir, f"{target}_{instrument.lower()}_{iteration:02d}.fake"))
+        subprocess.run(["touch", f"fakestars_{iteration:02d}.done"], cwd=dolphot_dir)
 
     #Close logger
     handlers = dolphot_logger.handlers[:] 
@@ -653,8 +666,38 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
 
 
 
+def _run_extra_ast_if_ready(path, reduct_dir, iteration):
+    """Joblib worker: run one additional AST iteration if prerequisites are met.
+
+    Requires ``dolphot.done`` and ``fakestars.done`` (original AST run complete).
+    Skips silently if ``fakestars_{iteration:02d}.done`` already exists.
+
+    Parameters
+    ----------
+    path : str
+        Full path to the target's raw data directory.
+    reduct_dir : str
+        Root reduction directory containing per-target subdirectories.
+    iteration : int
+        Iteration number (1--9); controls the output ``.fake`` filename suffix
+        and the ``fakestars_NN.done`` marker written on completion.
+    """
+    target = os.path.basename(path)
+    target_dir = os.path.join(reduct_dir, target)
+    if (os.path.isfile(os.path.join(target_dir, "dolphot.done")) and
+            os.path.isfile(os.path.join(target_dir, "fakestars.done")) and
+            not os.path.isfile(os.path.join(target_dir, f"fakestars_{iteration:02d}.done"))):
+        run_dolphot(target, fake_stars=True, iteration=iteration)
+
+
 #Execute functions
-global_logger = make_logger("global", filename="HCNS_dolphot_archival.log" if args.archival else "HCNS_dolphot.log")
+if args.archival:
+    _log_filename = "HCNS_dolphot_archival.log"
+elif args.ast:
+    _log_filename = "HCNS_dolphot_ast.log"
+else:
+    _log_filename = "HCNS_dolphot.log"
+global_logger = make_logger("global", filename=_log_filename)
 
 N_CPU = 10
 CTE = True
@@ -671,14 +714,31 @@ if args.archival:
         reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction', 'archival', prog_id))
         os.makedirs(reduct_dir, exist_ok=True)
         paths = glob.glob(os.path.join(data_dir, '*'))
-        global_logger.info(f'Running dolphot prep for {prog_id}.')
-        Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_prep_dolphot)(path) for path in paths)
-        global_logger.info(f'Running dolphot for {prog_id}.')
-        for path in paths:
-            _check_stale(path, reduct_dir)
-        Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False) for path in paths)
-        global_logger.info(f'Running ASTs for {prog_id}.')
-        Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True) for path in paths)
+        if args.ast:
+            for iteration in range(1, 10):
+                global_logger.info(f'Running extra AST iteration {iteration:02d} for {prog_id}.')
+                Parallel(n_jobs=N_CPU, prefer='threads')(
+                    delayed(_run_extra_ast_if_ready)(path, reduct_dir, iteration)
+                    for path in paths)
+        else:
+            global_logger.info(f'Running dolphot prep for {prog_id}.')
+            Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_prep_dolphot)(path) for path in paths)
+            global_logger.info(f'Running dolphot for {prog_id}.')
+            for path in paths:
+                _check_stale(path, reduct_dir)
+            Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False) for path in paths)
+            global_logger.info(f'Running ASTs for {prog_id}.')
+            Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True) for path in paths)
+
+elif args.ast:
+    paths = [p for p in glob.glob(os.path.join(data_dir, "*"))
+             if os.path.isdir(p) and os.path.basename(p) != 'archival']
+    for iteration in range(1, 10):
+        global_logger.info(f'Running extra AST iteration {iteration:02d}.')
+        Parallel(n_jobs=N_CPU)(
+            delayed(_run_extra_ast_if_ready)(path, reduct_dir, iteration)
+            for path in paths)
+
 else:
     #Prep dolphot
     global_logger.info(f'Running dolphot prep for all downloaded targets.')

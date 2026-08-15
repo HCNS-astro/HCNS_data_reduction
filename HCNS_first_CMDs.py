@@ -185,6 +185,49 @@ max_mag = 30.
 max_sharp = 0.1
 crowd_thresh = 1.0
 
+
+def _process_fake_catalog(df_raw, Nimages):
+    """Rename dolphot .fake columns and apply standard quality cuts.
+
+    Parameters
+    ----------
+    df_raw : pandas.DataFrame
+        Raw whitespace-separated DataFrame read directly from a ``.fake`` file.
+    Nimages : int
+        Number of input images, used to compute column index offsets.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Tidy DataFrame with named columns and a ``recovered`` flag column,
+        matching the schema of ``phot_ast.csv``.
+    """
+    c1 = 5 + Nimages
+    c2 = c1 + Nimages + 3
+    c3 = c2 + 6 + 5
+    c4 = c3 + 8 + 5
+    df = df_raw.rename(columns={
+        2: 'x', 3: 'y', 5: 'F606W_in', c1: 'F814W_in',
+        c2: 'chi', c2+1: 'SNR', c2+2: 'sharpness', c2+3: 'roundness',
+        c2+4: 'pa', c2+5: 'crowding', c2+6: 'type',
+        c3: 'F606W_out', c3+1: 'V_out', c3+2: 'err_F606W_out',
+        c3+3: 'chi_F606W', c3+4: 'SNR_F606W', c3+5: 'sharpness_F606W',
+        c3+6: 'roundness_F606W', c3+7: 'crowding_F606W', c3+8: 'flag_F606W',
+        c4: 'F814W_out', c4+1: 'I_out', c4+2: 'err_F814W_out',
+        c4+3: 'chi_F814W', c4+4: 'SNR_F814W', c4+5: 'sharpness_F814W',
+        c4+6: 'roundness_F814W', c4+7: 'crowding_F814W', c4+8: 'flag_F814W',
+    })
+    condition = ((df['F606W_out'] < 99.) & (df['F814W_out'] < 99.) &
+                 (df['type'] < 3) &
+                 (df['crowding_F606W'] + df['crowding_F814W'] < crowd_thresh) &
+                 ((df['sharpness_F606W'] + df['sharpness_F814W'])**2. < max_sharp))
+    df['recovered'] = numpy.where(condition, 1, 0)
+    df['x'] = numpy.array(df['x']) - 0.5
+    df['y'] = numpy.array(df['y']) - 0.5
+    return df[['x', 'y', 'F606W_in', 'F814W_in', 'F606W_out', 'F814W_out',
+               'SNR', 'SNR_F606W', 'SNR_F814W', 'recovered']]
+
+
 # HCNS targets -- exclude the 'archival' subdirectory
 all_targets = [(data_dir, reduct_dir, out_dir, os.path.basename(p))
                for p in glob.glob(os.path.join(data_dir, '*'))
@@ -405,46 +448,15 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     if (os.path.isfile(os.path.join(eff_reduct_dir, target, "fakestars.done")) and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_ast.csv'))):
 
         # Now create file for fake stars
-        fake_stars = pandas.read_csv(ast_file, sep=r'\s+', header=None)
-
         if Nimages is None:
             global_logger.warning(f'Could not read Nimg from phot_pars for {target}. Falling back to Nimages=8.')
             Nimages = 8
-        # Column offsets derived from the dolphot fake-star output format:
-        # c1: start of the second filter's global photometry block
-        # c2: start of the per-source summary columns (chi, snr, sharp, etc.)
-        # c3/c4: per-filter individual photometry columns for filter 1 and filter 2
-        c1 = 5 + Nimages
-        c2 = c1 + Nimages + 3
-        c3 = c2 + 6 + 5
-        #For later versions of dolphot the sharpness, roundness, pa, crowding and type indices
-        #need to be increased by 1
-        c4 = c3 + 8 + 5
-        fake_stars = fake_stars.rename(columns={2:'x', 3:'y', 5:'F606W_in', c1:'F814W_in', c2:'chi', c2+1:'SNR',
-                                                c2+2:'sharpness', c2+3:'roundness', c2+4:'pa', c2+5:'crowding', c2+6:'type',
-                                                c3:'F606W_out', c3+1:'V_out', c3+2:'err_F606W_out', c3+3:'chi_F606W',
-                                                c3+4:'SNR_F606W', c3+5:'sharpness_F606W', c3+6:'roundness_F606W',
-                                                c3+7:'crowding_F606W', c3+8:'flag_F606W',
-                                                c4:'F814W_out', c4+1:'I_out', c4+2:'err_F814W_out', c4+3:'chi_F814W',
-                                                c4+4:'SNR_F814W', c4+5:'sharpness_F814W', c4+6:'roundness_F814W',
-                                                c4+7:'crowding_F814W', c4+8:'flag_F814W'})
-
-        fake_stars['F606W-F814W'] = fake_stars['F606W_in']-fake_stars['F814W_in']
-
-        condition = ((fake_stars['F606W_out'] < 99.) & (fake_stars['F814W_out'] < 99.) & 
-                     (fake_stars['type'] < 3) &
-                     (fake_stars['crowding_F606W'] + fake_stars['crowding_F814W'] < crowd_thresh) &
-                     ((fake_stars['sharpness_F606W'] + fake_stars['sharpness_F814W'])**2. < max_sharp))
-
-        fake_stars['recovered'] = numpy.where(condition,1,0)
+        fake_stars = _process_fake_catalog(
+            pandas.read_csv(ast_file, sep=r'\s+', header=None), Nimages)
 
         global_logger.info(f'Fake star catalog length for {target}: {len(fake_stars)}')
-        global_logger.info(f'Recovery fraction: {numpy.sum(fake_stars['recovered'])/len(fake_stars)}')
+        global_logger.info(f'Recovery fraction: {numpy.sum(fake_stars["recovered"])/len(fake_stars)}')
 
-        fake_stars['x'] = numpy.array(fake_stars['x'])-0.5
-        fake_stars['y'] = numpy.array(fake_stars['y'])-0.5
-        fake_stars = fake_stars[['x','y','F606W_in','F814W_in','F606W_out','F814W_out',
-                                 'SNR','SNR_F606W','SNR_F814W','recovered']]
         ast_outfile = os.path.join(eff_out_dir,target,'phot_ast.csv')
         global_logger.info(f'Saving AST photometry catalog to {ast_outfile}.')
         fake_stars.to_csv(ast_outfile,index=False)
@@ -527,8 +539,89 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
 
     elif not os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")):
         global_logger.info(f'Photometry for {target} incomplete. Skipping.')
-    else:
-        continue
+
+    # Check for extra AST iterations produced by --ast mode in HCNS_dolphot.py
+    extra_fake_files = sorted(glob.glob(
+        os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_??.fake')))
+    ast_full_path = os.path.join(eff_out_dir, target, 'phot_ast_full.csv')
+    if (extra_fake_files and
+            os.path.isfile(os.path.join(eff_out_dir, target, 'phot_ast.csv')) and
+            not os.path.isfile(ast_full_path)):
+        if Nimages is None:
+            Nimages = 8
+        global_logger.info(
+            f'{len(extra_fake_files)} extra AST file(s) found for {target}. Building full catalog.')
+        dfs = [pandas.read_csv(os.path.join(eff_out_dir, target, 'phot_ast.csv'))]
+        for ef in extra_fake_files:
+            dfs.append(_process_fake_catalog(
+                pandas.read_csv(ef, sep=r'\s+', header=None), Nimages))
+        fake_stars_full = pandas.concat(dfs, ignore_index=True)
+        global_logger.info(f'Full AST catalog for {target}: {len(fake_stars_full)} stars.')
+        fake_stars_full.to_csv(ast_full_path, index=False)
+
+        # Re-fit completeness curves on the full catalog, overwriting completeness.dat/pdf
+        m_min = 21.
+        m_max = 30.
+        m_wid = 0.1
+        m_bins = numpy.arange(m_min, m_max+0.1*m_wid, m_wid)
+        colmax = 2.0
+        colmin = -1.0
+        colwid = 0.2
+        colbins = numpy.arange(colmin, colmax+0.1*colwid, colwid)
+        C90 = numpy.zeros(len(colbins)-1)
+        C50 = numpy.zeros(len(colbins)-1)
+
+        global_logger.info(f'Fitting completeness limits for {target} (full AST catalog).')
+        fake_stars_full['F606W-F814W'] = fake_stars_full['F606W_in'] - fake_stars_full['F814W_in']
+        for c in range(len(colbins)-1):
+            condition = ((fake_stars_full['F606W-F814W'] < colbins[c+1]) &
+                         (fake_stars_full['F606W-F814W'] > colbins[c]))
+            fake_stars_colbin = fake_stars_full[condition]
+            comp = numpy.zeros(len(m_bins)-1)
+            cnts  = numpy.zeros(len(m_bins)-1)
+            for i in fake_stars_colbin.index:
+                j = int(max(min(len(m_bins)-2,
+                               numpy.floor((fake_stars_colbin['F814W_in'][i]-m_min)/m_wid)), 0))
+                if fake_stars_colbin['recovered'][i] > 0:
+                    comp[j] += 1.
+                cnts[j] += 1.
+            comp = comp/cnts
+            inx = numpy.where(comp > 0.4)[0]
+            try:
+                erf_fit = scipy.optimize.curve_fit(
+                    comp_func, m_bins[inx]+0.05, comp[inx], p0=[26.5,0.5],
+                    sigma=1./numpy.sqrt(cnts[inx]), bounds=[[24.,0.1],[28.,3.]])
+                C90[c] = inv_comp_func(0.9, erf_fit[0][0], erf_fit[0][1])
+                C50[c] = erf_fit[0][0]
+            except ValueError:
+                C90[c] = numpy.nan
+                C50[c] = numpy.nan
+
+        try:
+            fit90 = scipy.optimize.curve_fit(
+                col_comp_func, colbins[:-1]+0.5*colwid, C90, p0=[0.8,26.5,0.])
+            global_logger.info(
+                f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
+            fit50 = scipy.optimize.curve_fit(
+                lambda x,a,b: a*x + b, colbins[:-1]+0.5*colwid, C50, p0=[1,30])
+            global_logger.info(
+                f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
+            with open(os.path.join(eff_out_dir, target, 'completeness.dat'), 'w') as f:
+                f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
+                f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
+            x_tmp = numpy.arange(-1., 2.0, 0.01)
+            plt.plot(x_tmp, col_comp_func(x_tmp, fit90[0][0], fit90[0][1], fit90[0][2]))
+            plt.plot(x_tmp, fit50[0][0]*x_tmp + fit50[0][1])
+        except ValueError:
+            global_logger.warning(
+                f'Completeness limit fit failed for {target} (full AST catalog).')
+        plt.scatter(colbins[:-1]+0.5*colwid, C90)
+        plt.scatter(colbins[:-1]+0.5*colwid, C50)
+        plt.ylim(29, 24)
+        plt.ylabel('F814W')
+        plt.xlabel('F606W-F814W')
+        plt.savefig(os.path.join(eff_out_dir, target, 'completeness.pdf'), bbox_inches='tight')
+        plt.close()
 
 
 
