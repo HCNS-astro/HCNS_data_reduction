@@ -571,14 +571,18 @@ def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
 
     #Run dolphot
     dolphot_logger.info(f'Running dolphot for {target}.')
+    # For extra iterations, rename the original .fake to _00.fake before
+    # dolphot runs so it is not overwritten.
+    fake_base = os.path.join(dolphot_dir, f"{target}_{instrument.lower()}.fake")
+    if fake_stars and iteration is not None:
+        zero_fake = os.path.join(dolphot_dir, f"{target}_{instrument.lower()}_00.fake")
+        if not os.path.isfile(zero_fake) and os.path.isfile(fake_base):
+            os.rename(fake_base, zero_fake)
+
     if not fake_stars:
         command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars"]
-    elif iteration is None:
-        command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars_fake"]
     else:
-        # Use an iteration-suffixed base name so dolphot writes directly to
-        # {target}_{instr}_{NN}.fake, leaving the original .fake untouched.
-        command = ["dolphot", f"{target}_{instrument.lower()}_{iteration:02d}", "-pphot_pars_fake"]
+        command = ["dolphot", f"{target}_{instrument.lower()}", "-pphot_pars_fake"]
     execute_command(command, dolphot_dir, dolphot_logger)
     dolphot_logger.info(f'Dolphot completed for {target}.')
     global_logger.info(f'Dolphot completed for {target}.')
@@ -587,6 +591,8 @@ def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
     elif iteration is None:
         subprocess.run(["touch", "fakestars.done"], cwd=dolphot_dir)
     else:
+        os.rename(fake_base,
+                  os.path.join(dolphot_dir, f"{target}_{instrument.lower()}_{iteration:02d}.fake"))
         subprocess.run(["touch", f"fakestars_{iteration:02d}.done"], cwd=dolphot_dir)
 
     #Close logger

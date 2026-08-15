@@ -279,7 +279,9 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             continue
     
     dolphot_outfile = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}')
-    ast_file = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}.fake')
+    _fake_std = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}.fake')
+    _fake_00  = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_00.fake')
+    ast_file  = _fake_std if os.path.isfile(_fake_std) else _fake_00
 
     if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")) and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_target_initial.csv'))):
 
@@ -541,8 +543,10 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         global_logger.info(f'Photometry for {target} incomplete. Skipping.')
 
     # Check for extra AST iterations produced by --ast mode in HCNS_dolphot.py
-    extra_fake_files = sorted(glob.glob(
-        os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_??.fake')))
+    extra_fake_files = sorted(
+        f for f in glob.glob(
+            os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_??.fake'))
+        if not os.path.basename(f).endswith('_00.fake'))
     ast_full_path = os.path.join(eff_out_dir, target, 'phot_ast_full.csv')
     if (extra_fake_files and
             os.path.isfile(os.path.join(eff_out_dir, target, 'phot_ast.csv')) and
