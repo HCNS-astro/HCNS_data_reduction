@@ -12,6 +12,8 @@ parser.add_argument('--ast', action='store_true',
                     help='Run 9 additional AST iterations per target, '
                          'saving each with a _01 ... _09 suffix. '
                          'Requires the standard AST run to have completed first.')
+parser.add_argument('--ncpu', type=int, default=10,
+                    help='Number of simultaneous dolphot processes (default: 10).')
 args = parser.parse_args()
 
 if args.archival:
@@ -718,7 +720,7 @@ else:
     _log_filename = "HCNS_dolphot.log"
 global_logger = make_logger("global", filename=_log_filename)
 
-N_CPU = 10
+N_CPU = args.ncpu
 CTE = True
 
 if args.archival:
