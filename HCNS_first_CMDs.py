@@ -28,6 +28,7 @@ completeness.pdf, completeness.dat
 HCNS_first_CMDs.log
     Run log.
 """
+import argparse
 import os, sys, glob, numpy, scipy, pandas
 import shutil, subprocess, logging
 from astropy.io import fits
@@ -46,6 +47,11 @@ plt.rcParams.update({
     "font.size": 18
 })
 
+
+parser = argparse.ArgumentParser(description='Generate initial CMDs for HCNS targets.')
+parser.add_argument('--overwrite', action='store_true',
+                    help='Reprocess outputs even if they already exist.')
+args = parser.parse_args()
 
 code_dir = os.getcwd()
 data_dir = os.path.abspath(os.path.join(code_dir,'..','data'))
@@ -283,7 +289,8 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     _fake_00  = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_00.fake')
     ast_file  = _fake_std if os.path.isfile(_fake_std) else _fake_00
 
-    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")) and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_target_initial.csv'))):
+    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")) and
+            (not os.path.isfile(os.path.join(eff_out_dir, target, 'phot_target_initial.csv')) or args.overwrite)):
 
         dolphot_cat = pandas.read_csv(dolphot_outfile, sep=r'\s+', header=None)
 
@@ -447,7 +454,8 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
 
 
 
-    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "fakestars.done")) and not os.path.isfile(os.path.join(eff_out_dir,target,'phot_ast.csv'))):
+    if (os.path.isfile(os.path.join(eff_reduct_dir, target, "fakestars.done")) and
+            (not os.path.isfile(os.path.join(eff_out_dir, target, 'phot_ast.csv')) or args.overwrite)):
 
         # Now create file for fake stars
         if Nimages is None:
@@ -550,7 +558,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     ast_full_path = os.path.join(eff_out_dir, target, 'phot_ast_full.csv')
     if (extra_fake_files and
             os.path.isfile(os.path.join(eff_out_dir, target, 'phot_ast.csv')) and
-            not os.path.isfile(ast_full_path)):
+            (not os.path.isfile(ast_full_path) or args.overwrite)):
         if Nimages is None:
             Nimages = 8
         global_logger.info(

@@ -13,6 +13,7 @@ Outputs (per target, under ``out_dir/<target>/``)
 <target>_RGB.png
 HCNS_RGB_images.log
 """
+import argparse
 import sys, os, glob, shutil, logging, copy
 import numpy as np
 import pandas as pd
@@ -29,6 +30,11 @@ import astropy.units as u
 from scipy.spatial import KDTree
 from skimage.transform import AffineTransform
 import cv2
+
+parser = argparse.ArgumentParser(description='Create RGB images for HCNS targets.')
+parser.add_argument('--overwrite', action='store_true',
+                    help='Regenerate images even if they already exist.')
+args = parser.parse_args()
 
 verbose = False
 
@@ -238,7 +244,7 @@ for eff_data_dir, eff_out_dir, target in all_targets:
     target_dir = os.path.join(eff_data_dir,target)
     target_out_dir = os.path.join(eff_out_dir,target)
     
-    if os.path.isfile(os.path.join(target_out_dir,f'{target}_RGB.png')):
+    if os.path.isfile(os.path.join(target_out_dir,f'{target}_RGB.png')) and not args.overwrite:
         rgb_mtime = os.path.getmtime(os.path.join(target_out_dir, f'{target}_RGB.png'))
         data_files = glob.glob(os.path.join(target_dir, '*.fits'))
         if data_files and max(os.path.getmtime(f) for f in data_files) > rgb_mtime:
