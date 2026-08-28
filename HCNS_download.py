@@ -67,11 +67,15 @@ for obs_str in bad_obs_list:
 if len(drop_inx) > 0:
     HCNS_obs.remove_rows(drop_inx)
 
-observed_targets = list(set(HCNS_obs['target_name']))
 if args.targets:
-    good_targets = set(np.loadtxt('good_obs.list', dtype='str', ndmin=1).tolist())
-    observed_targets = [t for t in observed_targets if t in good_targets]
-    logging.info(f'--targets active: {len(observed_targets)} target(s) selected.')
+    good_obs_list = np.loadtxt('good_obs.list', dtype='str', ndmin=1)
+    keep_inx = [i for i in range(len(HCNS_obs))
+                if any(obs_str.lower() in HCNS_obs['dataURL'][i]
+                       for obs_str in good_obs_list)]
+    HCNS_obs = HCNS_obs[keep_inx]
+    logging.info(f'--targets active: {len(keep_inx)} observations match good_obs.list.')
+
+observed_targets = list(set(HCNS_obs['target_name']))
 logging.info(f'Targets to download: {", ".join(observed_targets)}')
 
 
