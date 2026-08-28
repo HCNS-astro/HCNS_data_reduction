@@ -103,7 +103,7 @@ for target in tqdm.tqdm(observed_targets):
     target_dir = os.path.join(data_dir,target)
 
     if not os.path.isdir(target_dir):
-        os.mkdir(target_dir)
+        os.makedirs(target_dir)
         logging.info(f'{target_dir} created.')
 
     target_obs = HCNS_obs[HCNS_obs['target_name'] == str(target)]
