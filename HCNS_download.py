@@ -23,6 +23,7 @@ HCNS_download.log
 """
 from astroquery.mast import Observations
 from astropy.table import Table
+import argparse
 import os
 import signal
 import sys
@@ -41,6 +42,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+
+parser = argparse.ArgumentParser(
+    description='Download HST science data for HCNS targets from MAST.')
+parser.add_argument('--targets', action='store_true',
+                    help='Only download targets listed in good_obs.list.')
+args = parser.parse_args()
 
 code_dir = os.getcwd()
 data_dir = os.path.abspath(os.path.join(code_dir,'..','data'))
@@ -61,7 +68,11 @@ if len(drop_inx) > 0:
     HCNS_obs.remove_rows(drop_inx)
 
 observed_targets = list(set(HCNS_obs['target_name']))
-logging.info(f'Targets observed to date: {", ".join(observed_targets)}')
+if args.targets:
+    good_targets = set(np.loadtxt('good_obs.list', dtype='str', ndmin=1).tolist())
+    observed_targets = [t for t in observed_targets if t in good_targets]
+    logging.info(f'--targets active: {len(observed_targets)} target(s) selected.')
+logging.info(f'Targets to download: {", ".join(observed_targets)}')
 
 
 _stop_after_target = False
