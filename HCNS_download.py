@@ -139,6 +139,18 @@ if args.archival:
     if len(archival_targets) > 0:
         logging.info(f'archival_targets.list: will restrict to {len(archival_targets)} listed observation(s).')
 
+    # Load optional MAST→HCNS name map (two columns: MAST_NAME HCNS_NAME)
+    name_map = {}
+    if os.path.isfile('archival_name_map.list'):
+        with open('archival_name_map.list') as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith('#'):
+                    _mast, _hcns = _line.split()
+                    name_map[_mast.upper()] = _hcns.upper()
+    if name_map:
+        logging.info(f'archival_name_map.list: {len(name_map)} name mapping(s) loaded.')
+
     # Load HCNS sample table for cross-matching
     google_sheet_id = '1MFvVh57tIhzc6vUUmrCvDwyYzSojJTZtpqzXfRgC48s'
     sample_url = f"https://docs.google.com/spreadsheets/d/{google_sheet_id}/export?format=csv"
@@ -160,6 +172,12 @@ if args.archival:
                     if any(s.lower() in obs['dataURL'][i] for s in archival_bad)]
         if drop_inx:
             obs.remove_rows(drop_inx)
+
+        # Normalise MAST target names: apply name map where available,
+        # otherwise just uppercase.  This makes the cross-match case-insensitive
+        # and lets the name map handle MAST naming-convention differences.
+        obs['target_name'] = [name_map.get(t.upper(), t.upper())
+                              for t in obs['target_name']]
 
         # Keep only targets in the HCNS sample
         keep_inx = [i for i in range(len(obs))

@@ -1,0 +1,7 @@
+# Map MAST target names to canonical HCNS names.
+# Two columns, whitespace-separated: MAST_NAME  HCNS_NAME
+# Both are case-insensitive (converted to uppercase internally).
+# Lines starting with # are ignored.
+#
+# Example:
+#   CENA-DW9    CENA-MM-DW9
