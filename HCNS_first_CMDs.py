@@ -283,7 +283,9 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         else:
             global_logger.warning(f'Instrument not set for {target}. Skipping CMD creation.')
             continue
-    
+    if instrument is None:
+        global_logger.warning(f'No DRC files found for {target}. Skipping.')
+        continue
     dolphot_outfile = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}')
     _fake_std = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}.fake')
     _fake_00  = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_00.fake')
@@ -556,9 +558,11 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_??.fake'))
         if not os.path.basename(f).endswith('_00.fake'))
     ast_full_path = os.path.join(eff_out_dir, target, 'phot_ast_full.csv')
+    _ast_full_mtime = os.path.getmtime(ast_full_path) if os.path.isfile(ast_full_path) else 0
+    _new_extra = any(os.path.getmtime(ef) > _ast_full_mtime for ef in extra_fake_files)
     if (extra_fake_files and
             os.path.isfile(os.path.join(eff_out_dir, target, 'phot_ast.csv')) and
-            (not os.path.isfile(ast_full_path) or args.overwrite)):
+            (_new_extra or not os.path.isfile(ast_full_path) or args.overwrite)):
         if Nimages is None:
             Nimages = 8
         global_logger.info(
