@@ -124,7 +124,7 @@ def _download_target(target, target_dir, target_obs, exclude=()):
                 productType='SCIENCE',
                 project=['CALWF3', 'CALACS'],
                 productSubGroupDescription=subgroup)
-            if exclude:
+            if len(exclude) > 0:
                 keep_inx = [i for i in range(len(products))
                             if not any(s.lower() in products['productFilename'][i].lower()
                                        for s in exclude)]
@@ -176,65 +176,12 @@ if args.archival:
     hcns_sample['Name'] = hcns_sample['Name'].str.upper()
     hcns_sample = hcns_sample.set_index('Name')
 
-    for proj_id in proj_ids:
-        if _stop_after_target:
-            logging.info('Download stopped by user. Remaining projects skipped.')
-            break
-
-        logging.info(f'Querying MAST for project {proj_id}.')
-        obs = Observations.query_criteria(
-            proposal_id=[int(proj_id)], obs_collection='HST')
-
-        # Apply bad-obs exclusions
-        drop_inx = [i for i in range(len(obs))
-                    if any(s.lower() in obs['dataURL'][i] for s in archival_bad)]
-        if drop_inx:
-            obs.remove_rows(drop_inx)
-
-        # Normalise MAST target names: apply name map where available,
-        # otherwise just uppercase.  This makes the cross-match case-insensitive
-        # and lets the name map handle MAST naming-convention differences.
-        obs['target_name'] = [name_map.get(t.upper(), t.upper())
-                              for t in obs['target_name']]
-
-        # Keep only targets in the HCNS sample
-        keep_inx = [i for i in range(len(obs))
-                    if obs[i]['target_name'] in hcns_sample.index]
-        rejected = set(obs['target_name']) - set(obs[keep_inx]['target_name'])
-        if rejected:
-            logging.info(f'{proj_id}: rejected (not in HCNS sample): {", ".join(sorted(rejected))}')
-        obs = obs[keep_inx]
-
-        # Apply archival_targets.list filter if non-empty
-        if len(archival_targets) > 0:
-            keep_inx = [i for i in range(len(obs))
-                        if any(s.lower() in obs['dataURL'][i]
-                               for s in archival_targets)]
-            obs = obs[keep_inx]
-            logging.info(f'{proj_id}: {len(keep_inx)} observations match archival_targets.list.')
-
-        observed_targets = list(set(obs['target_name']))
-        logging.info(f'{proj_id}: targets to download: {", ".join(observed_targets)}')
-
-        data_dir = os.path.abspath(
-            os.path.join(code_dir, '..', 'data', 'archival', proj_id))
-        os.makedirs(data_dir, exist_ok=True)
-
-        logging.info(f'Starting download for project {proj_id}.')
-        for target in tqdm.tqdm(observed_targets, desc=proj_id):
-            if _stop_after_target:
-                logging.info('Download stopped by user. Remaining targets skipped.')
-                break
-            logging.info(f'Target: {target}')
-            _download_target(target, os.path.join(data_dir, target),
-                             obs[obs['target_name'] == str(target)],
-                             exclude=archival_bad)
-
     # -----------------------------------------------------------------
     # TSV-driven downloads: targeted per-row observation codes for
     # archival dwarfs identified in HCNS_Archival_Dwarfs.tsv.  Each row
     # already specifies exact observation codes, so no HCNS-sample
-    # cross-match is needed here (unlike the whole-project scan above).
+    # cross-match is needed here (unlike the whole-project scan below).
+    # Runs first since these are quick, targeted downloads.
     # -----------------------------------------------------------------
     tsv_path = 'HCNS_Archival_Dwarfs.tsv'
     if os.path.isfile(tsv_path):
@@ -301,6 +248,64 @@ if args.archival:
             with open('archival_name_map.list', 'a') as f:
                 f.writelines(new_map_lines)
             logging.info(f'Appended {len(new_map_lines)} new entries to archival_name_map.list.')
+
+    # -----------------------------------------------------------------
+    # Whole-project scan: iterate archival_projects.list, cross-matching
+    # each project's full observation list against the HCNS sample.
+    # -----------------------------------------------------------------
+    for proj_id in proj_ids:
+        if _stop_after_target:
+            logging.info('Download stopped by user. Remaining projects skipped.')
+            break
+
+        logging.info(f'Querying MAST for project {proj_id}.')
+        obs = Observations.query_criteria(
+            proposal_id=[int(proj_id)], obs_collection='HST')
+
+        # Apply bad-obs exclusions
+        drop_inx = [i for i in range(len(obs))
+                    if any(s.lower() in obs['dataURL'][i] for s in archival_bad)]
+        if drop_inx:
+            obs.remove_rows(drop_inx)
+
+        # Normalise MAST target names: apply name map where available,
+        # otherwise just uppercase.  This makes the cross-match case-insensitive
+        # and lets the name map handle MAST naming-convention differences.
+        obs['target_name'] = [name_map.get(t.upper(), t.upper())
+                              for t in obs['target_name']]
+
+        # Keep only targets in the HCNS sample
+        keep_inx = [i for i in range(len(obs))
+                    if obs[i]['target_name'] in hcns_sample.index]
+        rejected = set(obs['target_name']) - set(obs[keep_inx]['target_name'])
+        if rejected:
+            logging.info(f'{proj_id}: rejected (not in HCNS sample): {", ".join(sorted(rejected))}')
+        obs = obs[keep_inx]
+
+        # Apply archival_targets.list filter if non-empty
+        if len(archival_targets) > 0:
+            keep_inx = [i for i in range(len(obs))
+                        if any(s.lower() in obs['dataURL'][i]
+                               for s in archival_targets)]
+            obs = obs[keep_inx]
+            logging.info(f'{proj_id}: {len(keep_inx)} observations match archival_targets.list.')
+
+        observed_targets = list(set(obs['target_name']))
+        logging.info(f'{proj_id}: targets to download: {", ".join(observed_targets)}')
+
+        data_dir = os.path.abspath(
+            os.path.join(code_dir, '..', 'data', 'archival', proj_id))
+        os.makedirs(data_dir, exist_ok=True)
+
+        logging.info(f'Starting download for project {proj_id}.')
+        for target in tqdm.tqdm(observed_targets, desc=proj_id):
+            if _stop_after_target:
+                logging.info('Download stopped by user. Remaining targets skipped.')
+                break
+            logging.info(f'Target: {target}')
+            _download_target(target, os.path.join(data_dir, target),
+                             obs[obs['target_name'] == str(target)],
+                             exclude=archival_bad)
 
 
 # ---------------------------------------------------------------------------
