@@ -104,10 +104,12 @@ signal.signal(signal.SIGINT, _request_stop)
 # Shared download helper
 # ---------------------------------------------------------------------------
 
-def _download_target(target, target_dir, obs_table):
-    """Download DRC, FLC and FLT products for one target."""
+def _download_target(target, target_dir, target_obs):
+    """Download DRC, FLC and FLT products for one target.
+
+    ``target_obs`` must already be filtered to the rows for this target.
+    """
     os.makedirs(target_dir, exist_ok=True)
-    target_obs = obs_table[obs_table['target_name'] == str(target)]
     for obsid in set(target_obs['obsid']):
         product_list = Observations.get_unique_product_list(str(obsid))
         for subgroup in ('DRC', 'FLC', 'FLT'):
@@ -208,7 +210,79 @@ if args.archival:
                 logging.info('Download stopped by user. Remaining targets skipped.')
                 break
             logging.info(f'Target: {target}')
-            _download_target(target, os.path.join(data_dir, target), obs)
+            _download_target(target, os.path.join(data_dir, target),
+                             obs[obs['target_name'] == str(target)])
+
+    # -----------------------------------------------------------------
+    # TSV-driven downloads: targeted per-row observation codes for
+    # archival dwarfs identified in HCNS_Archival_Dwarfs.tsv.  Each row
+    # already specifies exact observation codes, so no HCNS-sample
+    # cross-match is needed here (unlike the whole-project scan above).
+    # -----------------------------------------------------------------
+    tsv_path = 'HCNS_Archival_Dwarfs.tsv'
+    if os.path.isfile(tsv_path):
+        tsv = pd.read_csv(tsv_path, sep='\t')
+        usable = tsv[tsv['Codes (Observation ID)'].notna() &
+                    (tsv['Codes (Observation ID)'].str.strip() != '')]
+        logging.info(f'{tsv_path}: {len(usable)} usable row(s) found.')
+
+        # Load existing name-map entries so we don't duplicate them.
+        existing_map_entries = set()
+        if os.path.isfile('archival_name_map.list'):
+            with open('archival_name_map.list') as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line and not _line.startswith('#'):
+                        existing_map_entries.add(_line.split()[0].upper())
+        new_map_lines = []
+
+        proj_obs_cache = {}
+        for _, row in usable.iterrows():
+            if _stop_after_target:
+                logging.info('Download stopped by user. Remaining tsv rows skipped.')
+                break
+
+            hcns_name = str(row['HCNS_Name']).strip()
+            other_name = str(row['Other_Names']).strip() if pd.notna(row['Other_Names']) else hcns_name
+            codes = [c.strip().lower() for c in str(row['Codes (Observation ID)']).split(',') if c.strip()]
+            proj_id = str(int(row['Proposal_ID']))
+
+            if proj_id not in proj_obs_cache:
+                logging.info(f'Querying MAST for project {proj_id} (tsv-driven).')
+                proj_obs = Observations.query_criteria(proposal_id=[int(proj_id)], obs_collection='HST')
+                drop_inx = [i for i in range(len(proj_obs))
+                            if any(s.lower() in proj_obs['dataURL'][i] for s in archival_bad)]
+                if drop_inx:
+                    proj_obs.remove_rows(drop_inx)
+                proj_obs_cache[proj_id] = proj_obs
+            proj_obs = proj_obs_cache[proj_id]
+
+            keep_inx = [i for i in range(len(proj_obs))
+                        if any(code in proj_obs['dataURL'][i] for code in codes)]
+            if not keep_inx:
+                logging.warning(f'{hcns_name}: none of the codes {codes} matched any '
+                                f'observation in project {proj_id}. Skipping.')
+                continue
+            row_obs = proj_obs[keep_inx]
+
+            mast_names = sorted(set(row_obs['target_name']))
+            if other_name.upper() not in [n.upper() for n in mast_names]:
+                logging.info(f'{hcns_name}: MAST target_name {mast_names} differs from '
+                            f'tsv Other_Names "{other_name}" (see {tsv_path}).')
+
+            logging.info(f'{hcns_name} ({other_name}): downloading proposal {proj_id}, codes {codes}.')
+            data_dir_tsv = os.path.abspath(os.path.join(code_dir, '..', 'data', 'archival', proj_id))
+            os.makedirs(data_dir_tsv, exist_ok=True)
+            _download_target(hcns_name, os.path.join(data_dir_tsv, hcns_name), row_obs)
+
+            if other_name.upper() != hcns_name.upper() and other_name.upper() not in existing_map_entries:
+                new_map_lines.append(f'{other_name.upper()}\t{hcns_name.upper()}\n')
+                existing_map_entries.add(other_name.upper())
+
+        if new_map_lines:
+            with open('archival_name_map.list', 'a') as f:
+                f.writelines(new_map_lines)
+            logging.info(f'Appended {len(new_map_lines)} new entries to archival_name_map.list.')
 
 
 # ---------------------------------------------------------------------------
@@ -251,4 +325,5 @@ else:
             logging.info('Download stopped by user. Remaining targets skipped.')
             break
         logging.info(f'Target: {target}')
-        _download_target(target, os.path.join(data_dir, target), HCNS_obs)
+        _download_target(target, os.path.join(data_dir, target),
+                         HCNS_obs[HCNS_obs['target_name'] == str(target)])
