@@ -24,6 +24,38 @@ else:
     reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction'))
 
 
+# ---------------------------------------------------------------------------
+# Filter selection for dolphot.  dolphot's fakelist tool can only generate
+# artificial stars in two bands, so when a target has data in more than two
+# filters we pick exactly two here, before any files are copied into the
+# dolphot working directory -- everything downstream only ever sees these two.
+#
+# F814W is always used as the red anchor.  The blue band is the first filter
+# in this list (in preference order) that is actually present in the data.
+# Edit this list to add or reorder acceptable blue-band filters.
+# ---------------------------------------------------------------------------
+RED_FILTER = 'F814W'
+BLUE_FILTER_PREFERENCE = ['F606W', 'F555W', 'F475W']
+
+
+def _header_filter(imgpath, instrument):
+    """Return the filter name from a FITS header for the given instrument."""
+    hdu = fits.open(imgpath)
+    header = hdu[0].header
+    match instrument:
+        case 'WFC3':
+            filtername = header['FILTER']
+        case 'ACS':
+            if 'CLEAR' not in header['FILTER1']:
+                filtername = header['FILTER1']
+            elif 'CLEAR' not in header['FILTER2']:
+                filtername = header['FILTER2']
+            else:
+                filtername = None
+    hdu.close()
+    return filtername
+
+
 def make_logger(name, filename, level=logging.INFO):
     """Create a logger that writes to both a file and stdout.
 
@@ -208,10 +240,40 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
         raw_expfilelist = glob.glob(os.path.join(target_dir,'*flc.fits'))
     raw_drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
 
-    #Copy files to dolphot dir
+    # Determine instrument and available filters from the raw DRC files, then
+    # pick the two filters dolphot will process (see RED_FILTER /
+    # BLUE_FILTER_PREFERENCE above).
+    instrument = None
+    available_filters = set()
+    for imgpath in raw_drizfilelist:
+        hdu = fits.open(imgpath)
+        header = hdu[0].header
+        if 'ACS' in header['INSTRUME']:
+            instrument = 'ACS'
+        elif 'WFC3' in header['INSTRUME']:
+            instrument = 'WFC3'
+        else:
+            global_logger.warning(f'Instrument not set for {target}. Dolphot prep failed for {target}.')
+            hdu.close()
+            return None
+        hdu.close()
+        available_filters.add(_header_filter(imgpath, instrument))
+
+    blue_filter = next((f for f in BLUE_FILTER_PREFERENCE if f in available_filters), None)
+    if RED_FILTER not in available_filters or blue_filter is None:
+        global_logger.warning(
+            f'{target}: need {RED_FILTER} plus one of {BLUE_FILTER_PREFERENCE} '
+            f'(found {sorted(available_filters)}). Skipping dolphot prep.')
+        return None
+    selected_filters = {RED_FILTER, blue_filter}
+    global_logger.info(f'{target}: selected filters for dolphot: {sorted(selected_filters)}.')
+
+    #Copy files to dolphot dir (only the two selected filters)
     expfilelist = []
     drizfilelist = []
     for imgpath in raw_expfilelist:
+        if _header_filter(imgpath, instrument) not in selected_filters:
+            continue
         imgfile = os.path.split(imgpath)[1]
         copypath = os.path.join(dolphot_dir,imgfile)
         if not os.path.isfile(copypath):
@@ -221,6 +283,8 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
             global_logger.info(f'{copypath} already exists.')
         expfilelist.append(copypath)
     for imgpath in raw_drizfilelist:
+        if _header_filter(imgpath, instrument) not in selected_filters:
+            continue
         imgfile = os.path.split(imgpath)[1]
         copypath = os.path.join(dolphot_dir,imgfile)
         if not os.path.isfile(copypath):

@@ -177,6 +177,30 @@ def star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, bl
 
     return affine_trans
 
+
+def align_to_reference(sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wcs,
+                       target, filtername, logger):
+    """Align a secondary-filter image onto the reference image's pixel grid.
+
+    Three-tier fallback: 1. astroalign (triangle-matching); 2. star-cloud ICP
+    if astroalign raises ``MaxIterError``; 3. WCS-only reprojection if both
+    alignment methods fail.
+    """
+    try:
+        aligned, footprint = astroalign.register(sec_img, ref_img, detection_sigma=4, min_area=9)
+        aligned, footprint = reproject_adaptive((aligned, ref_wcs), ref_wcs, shape_out=np.shape(ref_img))
+    except astroalign.MaxIterError:
+        logger.warning(f"WARNING: Astroalign failed for {target} ({filtername}). Attempting star cloud alignment.")
+        try:
+            aa_transform = star_cloud_alignment(ref_img, ref_header, ref_wcs, sec_img, sec_header, sec_wcs)
+            registered, footprint = astroalign.apply_transform(aa_transform, sec_img, ref_img)
+            aligned, footprint = reproject_adaptive((registered, ref_wcs), ref_wcs, shape_out=np.shape(ref_img))
+        except Exception:
+            logger.warning(f"WARNING: Star cloud alignment failed for {target} ({filtername}). Falling back to header WCS.")
+            aligned, footprint = reproject_adaptive((sec_img, sec_wcs), ref_wcs, shape_out=np.shape(ref_img))
+    return aligned
+
+
 def make_logger(name, filename, level=logging.INFO):
     """Create a logger that writes to both a file and stdout.
 
@@ -260,7 +284,7 @@ for eff_data_dir, eff_out_dir, target in all_targets:
         os.makedirs(target_out_dir, exist_ok=True)
     
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
-    
+
     filters = []
     instrument = None
     for imgpath in drizfilelist:
@@ -285,14 +309,15 @@ for eff_data_dir, eff_out_dir, target in all_targets:
                     global_logger.error('No filter identified.')
         filters.append(filtername)
         hdu.close()
-    filters = list(set(filters))
-    filters.sort()
-    
+    # Longest wavelength (reddest) first; this ordering sets the RGB reference
+    # image (index 0) and channel assignment below.
+    filters = sorted(set(filters), key=lambda f: int(f[1:4]), reverse=True)
+
     logger.info(f'Available filters for {target}: {", ".join(filters)}')
-    
-    filterdrizimg = []
-    
-    for i,filtername in enumerate(filters):
+
+    filterdrizimg = {}
+
+    for filtername in filters:
         for imgpath in drizfilelist:
             imgfile = os.path.split(imgpath)[1]
             inx = imgfile.find('.fits')
@@ -302,89 +327,71 @@ for eff_data_dir, eff_out_dir, target in all_targets:
             match instrument:
                 case 'WFC3':
                     if filtername in header['FILTER']:
-                        filterdrizimg.append(rootname)
+                        filterdrizimg[filtername] = rootname
                 case 'ACS':
                     if filtername in header['FILTER1']:
-                        filterdrizimg.append(rootname)
+                        filterdrizimg[filtername] = rootname
                     elif filtername in header['FILTER2']:
-                        filterdrizimg.append(rootname)
+                        filterdrizimg[filtername] = rootname
             hdu.close()
-    
-    
-    if len(filters) < 2:
-        logger.warning(f'{target} has data in fewer than 2 filters ({len(filters)} found). Skipping RGB image creation.')
-        continue
-    if len(filters) > 2:
-        logger.warning(f'{target} has data in more than 2 filters ({len(filters)} found). RGB image creation not supported. Skipping.')
-        continue
-    logger.info(f'Filters for RGB image will be: {filters[1]}, {filters[0]}+{filters[1]}, {filters[0]}')
-    
-    
-    imgpath = os.path.join(target_dir,filterdrizimg[0]+'.fits')
-    hdu = fits.open(imgpath)
-    blue_header = hdu[1].header
-    blue_img = hdu[1].data
-    blue_img = blue_img.view(blue_img.dtype.newbyteorder()).byteswap()  # native byte order for astroalign/cv2
-    blue_wcs = WCS(blue_header)
-    hdu.close()
 
-    imgpath = os.path.join(target_dir,filterdrizimg[1]+'.fits')
-    hdu = fits.open(imgpath)
-    red_header = hdu[1].header
-    red_img = hdu[1].data
-    red_img = red_img.view(red_img.dtype.newbyteorder()).byteswap()  # native byte order for astroalign/cv2
-    red_wcs = WCS(red_header)
-    hdu.close()
-    
-    
-    interval = ZScaleInterval(contrast=0.35,max_iterations=5)
-    interval.get_limits(red_img)
-    norm = ImageNormalize(red_img, interval=interval, stretch=LinearStretch())
-    
+
+    if len(filters) < 2 or len(filters) > 3:
+        logger.warning(f'{target} has data in {len(filters)} filters. RGB image creation supports 2 or 3. Skipping.')
+        continue
+    logger.info(f'Filters for RGB image (red to blue): {", ".join(filters)}')
+
+
+    images = {}
+    for filtername in filters:
+        imgpath = os.path.join(target_dir, filterdrizimg[filtername]+'.fits')
+        hdu = fits.open(imgpath)
+        header = hdu[1].header
+        img = hdu[1].data
+        img = img.view(img.dtype.newbyteorder()).byteswap()  # native byte order for astroalign/cv2
+        wcs = WCS(header)
+        hdu.close()
+        images[filtername] = (img, header, wcs)
+
+
+    # Save one greyscale PNG per filter, each in its own native pixel/WCS frame.
+    for filtername in filters:
+        img, header, wcs = images[filtername]
+        interval = ZScaleInterval(contrast=0.35,max_iterations=5)
+        interval.get_limits(img)
+        norm = ImageNormalize(img, interval=interval, stretch=LinearStretch())
+
+        fig = plt.figure(figsize=(15,15))
+        ax = plt.subplot(projection=wcs)
+        plt.imshow(img, norm=norm, origin='lower', cmap='Greys', aspect='equal')
+        plt.axis('off')
+        plt.savefig(os.path.join(target_out_dir,f'{target}_{filtername}_greyscale.png'),bbox_inches='tight',dpi=200)
+        logger.info(f'{filtername} image saved to: {target}_{filtername}_greyscale.png')
+        plt.close()
+
+
+    # Align every non-reference filter onto the reddest (reference) filter's
+    # pixel grid.
+    ref_filter = filters[0]
+    ref_img, ref_header, ref_wcs = images[ref_filter]
+    aligned = {ref_filter: ref_img}
+    for filtername in filters[1:]:
+        sec_img, sec_header, sec_wcs = images[filtername]
+        aligned[filtername] = align_to_reference(
+            sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wcs, target, filtername, logger)
+
+
+    if len(filters) == 2:
+        R, B = aligned[filters[0]], aligned[filters[1]]
+        # Green channel synthesised as the average of red and blue since only
+        # two science filters are available.
+        G = 0.5 * (R + B)
+    else:
+        R, G, B = aligned[filters[0]], aligned[filters[1]], aligned[filters[2]]
+    RGB_img = make_rgb(R, G, B, interval=ManualInterval(vmin=0, vmax=0.03))
+
     fig = plt.figure(figsize=(15,15))
-    ax = plt.subplot(projection=red_wcs)
-    plt.imshow(red_img, norm=norm, origin='lower', cmap='Greys', aspect='equal')
-    plt.axis('off')
-    plt.savefig(os.path.join(target_out_dir,f'{target}_{filters[1]}_greyscale.png'),bbox_inches='tight',dpi=200)
-    logger.info(f'Red image saved to: {target}_{filters[1]}_greyscale.png')
-    plt.close()
-    
-    
-    interval = ZScaleInterval(contrast=0.35,max_iterations=5)
-    interval.get_limits(blue_img)
-    norm = ImageNormalize(blue_img, interval=interval, stretch=LinearStretch())
-    
-    fig = plt.figure(figsize=(15,15))
-    ax = plt.subplot(projection=red_wcs)
-    plt.imshow(blue_img, norm=norm, origin='lower', cmap='Greys', aspect='equal')
-    plt.axis('off')
-    plt.savefig(os.path.join(target_out_dir,f'{target}_{filters[0]}_greyscale.png'),bbox_inches='tight',dpi=200)
-    logger.info(f'Blue image saved to: {target}_{filters[0]}_greyscale.png')
-    plt.close()
-    
-    
-    # Align the blue image to the red pixel grid using a three-tier fallback:
-    # 1. astroalign (triangle-matching); 2. star-cloud ICP if astroalign raises
-    # MaxIterError; 3. WCS-only reprojection if both alignment methods fail.
-    try:
-        blue_img, footprint = astroalign.register(blue_img, red_img, detection_sigma=4, min_area=9)
-        blue_img, footprint = reproject_adaptive((blue_img,red_wcs), red_wcs, shape_out=np.shape(red_img))
-    except astroalign.MaxIterError:
-        logger.warning(f"WARNING: Astroalign failed for {target}. Attempting star cloud alignment.")
-        try:
-            aa_transform = star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, blue_wcs)
-            registered_blue_img, footprint = astroalign.apply_transform(aa_transform, blue_img, red_img)
-            blue_img, footprint = reproject_adaptive((registered_blue_img,red_wcs), red_wcs, shape_out=np.shape(red_img))
-        except:
-            logger.warning(f"WARNING: Star cloud alignment failed for {target}. Falling back to header WCS.")
-            blue_img, footprint = reproject_adaptive((blue_img,blue_wcs), red_wcs, shape_out=np.shape(red_img))
-    
-    
-    # Green channel synthesised as the average of red and blue since only two science filters are available.
-    RGB_img = make_rgb(red_img,0.5*(red_img+blue_img),blue_img, interval=ManualInterval(vmin=0, vmax=0.03))
-    
-    fig = plt.figure(figsize=(15,15))
-    ax = plt.subplot(projection=red_wcs)
+    ax = plt.subplot(projection=ref_wcs)
     plt.imshow(RGB_img, origin='lower', aspect='equal')
     plt.axis('off')
     plt.savefig(os.path.join(target_out_dir,f'{target}_RGB.png'),bbox_inches='tight',dpi=200)
