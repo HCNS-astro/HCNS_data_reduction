@@ -104,10 +104,16 @@ signal.signal(signal.SIGINT, _request_stop)
 # Shared download helper
 # ---------------------------------------------------------------------------
 
-def _download_target(target, target_dir, target_obs):
+def _download_target(target, target_dir, target_obs, exclude=()):
     """Download DRC, FLC and FLT products for one target.
 
     ``target_obs`` must already be filtered to the rows for this target.
+    ``exclude`` is an iterable of observation-ID substrings (e.g. from
+    bad_obs.list); any product whose filename contains one of these strings
+    is skipped.  This is needed in addition to any upstream row-level
+    filtering because MAST can expose the same exposure files as products of
+    a different (e.g. HAP-association) observation record whose dataURL
+    doesn't literally name the exposure.
     """
     os.makedirs(target_dir, exist_ok=True)
     for obsid in set(target_obs['obsid']):
@@ -118,6 +124,16 @@ def _download_target(target, target_dir, target_obs):
                 productType='SCIENCE',
                 project=['CALWF3', 'CALACS'],
                 productSubGroupDescription=subgroup)
+            if exclude:
+                keep_inx = [i for i in range(len(products))
+                            if not any(s.lower() in products['productFilename'][i].lower()
+                                       for s in exclude)]
+                if len(keep_inx) < len(products):
+                    dropped = set(products['productFilename']) - set(products[keep_inx]['productFilename'])
+                    logging.info(f'Excluding bad-obs products: {", ".join(sorted(dropped))}')
+                products = products[keep_inx]
+            if len(products) == 0:
+                continue
             logging.info(f'Downloading {", ".join(list(products["productFilename"]))}')
             Observations.download_products(products, download_dir=target_dir, flat=True)
 
@@ -211,7 +227,8 @@ if args.archival:
                 break
             logging.info(f'Target: {target}')
             _download_target(target, os.path.join(data_dir, target),
-                             obs[obs['target_name'] == str(target)])
+                             obs[obs['target_name'] == str(target)],
+                             exclude=archival_bad)
 
     # -----------------------------------------------------------------
     # TSV-driven downloads: targeted per-row observation codes for
@@ -273,7 +290,8 @@ if args.archival:
             logging.info(f'{hcns_name} ({other_name}): downloading proposal {proj_id}, codes {codes}.')
             data_dir_tsv = os.path.abspath(os.path.join(code_dir, '..', 'data', 'archival', proj_id))
             os.makedirs(data_dir_tsv, exist_ok=True)
-            _download_target(hcns_name, os.path.join(data_dir_tsv, hcns_name), row_obs)
+            _download_target(hcns_name, os.path.join(data_dir_tsv, hcns_name), row_obs,
+                             exclude=archival_bad)
 
             if other_name.upper() != hcns_name.upper() and other_name.upper() not in existing_map_entries:
                 new_map_lines.append(f'{other_name.upper()}\t{hcns_name.upper()}\n')
@@ -326,4 +344,5 @@ else:
             break
         logging.info(f'Target: {target}')
         _download_target(target, os.path.join(data_dir, target),
-                         HCNS_obs[HCNS_obs['target_name'] == str(target)])
+                         HCNS_obs[HCNS_obs['target_name'] == str(target)],
+                         exclude=bad_obs_list)
