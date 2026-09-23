@@ -93,6 +93,14 @@ tests (ASTs).
 - `--ncpu` — number of simultaneous dolphot processes (default 10). Lower
   this if running `--ast` locks up the machine.
 
+**Archival parallelism.** In `--archival` mode, targets from every archival
+project are flattened into a single pool before each stage (prep, dolphot,
+AST) is parallelised, so `--ncpu` workers are shared across *all* archival
+programs at once rather than being confined to one program's targets at a
+time. This matters because most individual archival programs only have 1-2
+targets — without flattening, most of `--ncpu` would sit idle while a
+single-target program ran alone before moving to the next.
+
 **Filter selection.** dolphot's `fakelist` tool only supports two-band AST
 generation, so before any files are copied from the download directory,
 `prep_dolphot` selects exactly two filters: `F814W` is always the red

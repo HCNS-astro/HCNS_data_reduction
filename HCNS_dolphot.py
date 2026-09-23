@@ -133,7 +133,7 @@ def execute_command(command, exec_dir, logger):
         process.wait()
     return process.returncode
 
-def align_dolphot(target, logger, instrument=None):
+def align_dolphot(target, reduct_dir, logger, instrument=None):
     """Run dolphot in alignment-only mode and validate the result.
 
     Alignment is considered successful if every per-image sigma value is
@@ -143,6 +143,8 @@ def align_dolphot(target, logger, instrument=None):
     ----------
     target : str
         Target identifier (used to construct the dolphot output filename).
+    reduct_dir : str
+        Root reduction directory containing per-target subdirectories.
     logger : logging.Logger
         Logger for dolphot output.
     instrument : str, optional
@@ -188,7 +190,7 @@ def align_dolphot(target, logger, instrument=None):
     else:
         return True
 
-def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=None):
+def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=False, template_file=None):
     """Prepare all files and run the pre-photometry steps for dolphot.
 
     Steps performed (each guarded by a marker file so they are skipped on
@@ -200,6 +202,10 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
     ----------
     target : str
         Target identifier (must match a directory under ``data_dir``).
+    data_dir : str
+        Root data directory containing per-target raw-data subdirectories.
+    reduct_dir : str
+        Root reduction directory containing per-target subdirectories.
     CTE : bool, optional
         If ``True``, use FLT (non-CTE-corrected) exposures and enable
         ``useCTE`` in the parameter file.  Default is ``False``.
@@ -443,7 +449,7 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
         align_success = False
         align_attempt = 0
         while not align_success:
-            align_success = align_dolphot(target, dolphot_logger, instrument=instrument)
+            align_success = align_dolphot(target, reduct_dir, dolphot_logger, instrument=instrument)
             align_attempt += 1
             if not align_success:
                 dolphot_logger.info(f'Alignment attempt {align_attempt} failed.')
@@ -506,7 +512,7 @@ def prep_dolphot(target, CTE=False, align_iter=5, verbose=False, template_file=N
 
     return align_success
 
-def generate_fake_stars(target, dolphot_logger, Nfake=200000,
+def generate_fake_stars(target, reduct_dir, dolphot_logger, Nfake=200000,
                         filt_min=20, filt_max=30.5, col_min=-1.0, col_max=2.5):
     """Generate a fake-star input list for artificial star tests (ASTs).
 
@@ -519,6 +525,8 @@ def generate_fake_stars(target, dolphot_logger, Nfake=200000,
     ----------
     target : str
         Target identifier.
+    reduct_dir : str
+        Root reduction directory containing per-target subdirectories.
     dolphot_logger : logging.Logger
         Logger for status messages.
     Nfake : int, optional
@@ -576,7 +584,7 @@ def generate_fake_stars(target, dolphot_logger, Nfake=200000,
 
     return None
 
-def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
+def run_dolphot(target, reduct_dir, fake_stars=False, verbose=False, iteration=None):
     """Execute dolphot photometry on an already-prepped target directory.
 
     Removes the ``AlignOnly`` parameter from ``phot_pars`` before running.
@@ -588,6 +596,8 @@ def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
     ----------
     target : str
         Target identifier.
+    reduct_dir : str
+        Root reduction directory containing per-target subdirectories.
     fake_stars : bool, optional
         If ``True``, run dolphot with artificial star injection for ASTs.
         Default is ``False``.
@@ -619,7 +629,7 @@ def run_dolphot(target, fake_stars=False, verbose=False, iteration=None):
                 file.write(line)
             file.write('FakeStars = fakelist.dat\nRandomFake=1')
 
-        generate_fake_stars(target, dolphot_logger)
+        generate_fake_stars(target, reduct_dir, dolphot_logger)
 
     #Set instrument
     instrument = None
@@ -691,7 +701,7 @@ def _check_stale(path, reduct_dir):
             )
 
 
-def _prep_dolphot(path):
+def _prep_dolphot(path, data_dir, reduct_dir):
     """Joblib worker: prep dolphot for a single target if not already done.
 
     Skips silently if ``align.done`` or ``align.failed`` already exists in
@@ -701,6 +711,10 @@ def _prep_dolphot(path):
     ----------
     path : str
         Full path to the target's raw data directory.
+    data_dir : str
+        Root data directory containing per-target raw-data subdirectories.
+    reduct_dir : str
+        Root reduction directory containing per-target subdirectories.
     """
     target = str(os.path.split(path)[1])
 
@@ -708,7 +722,7 @@ def _prep_dolphot(path):
         global_logger.warning(f'Dolphot prep for {target} already ran, but alignment failed. Skipping.')
     elif not os.path.isfile(os.path.join(reduct_dir, target, "align.done")):
         try:
-            tmp = prep_dolphot(target, CTE=CTE)
+            tmp = prep_dolphot(target, data_dir, reduct_dir, CTE=CTE)
         except:
             global_logger.warning(f'Dolphot prep failed for {target}.')
 
@@ -735,12 +749,12 @@ def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
     if fake_stars:
         if (os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")) and
             not os.path.isfile(os.path.join(reduct_dir, target, "fakestars.done"))):
-            tmp = run_dolphot(target, fake_stars=True)
+            tmp = run_dolphot(target, reduct_dir, fake_stars=True)
     else:
         if not os.path.isfile(os.path.join(reduct_dir, target, "align.done")):
             global_logger.warning(f'Alignment incomplete for {target}. Skipping.')
         elif not os.path.isfile(os.path.join(reduct_dir, target, "dolphot.done")):
-            tmp = run_dolphot(target)
+            tmp = run_dolphot(target, reduct_dir)
 
 
 
@@ -769,10 +783,10 @@ def _run_extra_ast_if_ready(path, reduct_dir, iteration):
         return  # real photometry not complete; skip
 
     if not os.path.isfile(os.path.join(target_dir, "fakestars.done")):
-        run_dolphot(target, fake_stars=True)
+        run_dolphot(target, reduct_dir, fake_stars=True)
 
     if not os.path.isfile(os.path.join(target_dir, f"fakestars_{iteration:02d}.done")):
-        run_dolphot(target, fake_stars=True, iteration=iteration)
+        run_dolphot(target, reduct_dir, fake_stars=True, iteration=iteration)
 
 
 #Execute functions
@@ -788,32 +802,41 @@ N_CPU = args.ncpu
 CTE = True
 
 if args.archival:
-    # Iterate over program subdirectories (e.g. SNAP-17797) sequentially.
-    # prefer='threads' is used so that worker threads share this process's
-    # globals; updating data_dir/reduct_dir per program is then safe.
     prog_dirs = sorted(d for d in glob.glob(os.path.join(data_dir, '*')) if os.path.isdir(d))
+    # Flatten (path, reduct_dir) across all archival projects so dolphot can
+    # run simultaneously across projects, not just within a single one --
+    # most archival programs have only 1-2 targets, which previously left
+    # most CPUs idle while that program's single job ran alone before moving
+    # on to the next project.
+    all_path_reduct = []
     for prog_dir in prog_dirs:
         prog_id = os.path.basename(prog_dir)
-        global_logger.info(f'Processing archival program {prog_id}.')
-        data_dir   = prog_dir
-        reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction', 'archival', prog_id))
-        os.makedirs(reduct_dir, exist_ok=True)
-        paths = glob.glob(os.path.join(data_dir, '*'))
-        if args.ast:
-            for iteration in range(1, 10):
-                global_logger.info(f'Running extra AST iteration {iteration:02d} for {prog_id}.')
-                Parallel(n_jobs=N_CPU, prefer='threads')(
-                    delayed(_run_extra_ast_if_ready)(path, reduct_dir, iteration)
-                    for path in paths)
-        else:
-            global_logger.info(f'Running dolphot prep for {prog_id}.')
-            Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_prep_dolphot)(path) for path in paths)
-            global_logger.info(f'Running dolphot for {prog_id}.')
-            for path in paths:
-                _check_stale(path, reduct_dir)
-            Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=False) for path in paths)
-            global_logger.info(f'Running ASTs for {prog_id}.')
-            Parallel(n_jobs=N_CPU, prefer='threads')(delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True) for path in paths)
+        this_reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction', 'archival', prog_id))
+        os.makedirs(this_reduct_dir, exist_ok=True)
+        for path in glob.glob(os.path.join(prog_dir, '*')):
+            all_path_reduct.append((path, this_reduct_dir))
+
+    if args.ast:
+        for iteration in range(1, 10):
+            global_logger.info(f'Running extra AST iteration {iteration:02d} across all archival programs.')
+            Parallel(n_jobs=N_CPU, prefer='threads')(
+                delayed(_run_extra_ast_if_ready)(path, rdir, iteration)
+                for path, rdir in all_path_reduct)
+    else:
+        global_logger.info('Running dolphot prep across all archival programs.')
+        Parallel(n_jobs=N_CPU, prefer='threads')(
+            delayed(_prep_dolphot)(path, os.path.dirname(path), rdir)
+            for path, rdir in all_path_reduct)
+        global_logger.info('Running dolphot across all archival programs.')
+        for path, rdir in all_path_reduct:
+            _check_stale(path, rdir)
+        Parallel(n_jobs=N_CPU, prefer='threads')(
+            delayed(_run_dolphot_if_ready)(path, rdir, fake_stars=False)
+            for path, rdir in all_path_reduct)
+        global_logger.info('Running ASTs across all archival programs.')
+        Parallel(n_jobs=N_CPU, prefer='threads')(
+            delayed(_run_dolphot_if_ready)(path, rdir, fake_stars=True)
+            for path, rdir in all_path_reduct)
 
 elif args.ast:
     paths = [p for p in glob.glob(os.path.join(data_dir, "*"))
@@ -831,7 +854,7 @@ else:
              if os.path.isdir(p) and os.path.basename(p) != 'archival']
 
     Parallel(n_jobs=N_CPU)(
-        delayed(_prep_dolphot)(path)
+        delayed(_prep_dolphot)(path, data_dir, reduct_dir)
         for path in paths
     )
 
