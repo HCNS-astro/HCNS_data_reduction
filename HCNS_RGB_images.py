@@ -189,8 +189,8 @@ def align_to_reference(sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wc
     try:
         aligned, footprint = astroalign.register(sec_img, ref_img, detection_sigma=4, min_area=9)
         aligned, footprint = reproject_adaptive((aligned, ref_wcs), ref_wcs, shape_out=np.shape(ref_img))
-    except astroalign.MaxIterError:
-        logger.warning(f"WARNING: Astroalign failed for {target} ({filtername}). Attempting star cloud alignment.")
+    except Exception as e:
+        logger.warning(f"WARNING: Astroalign failed for {target} ({filtername}): {e}. Attempting star cloud alignment.")
         try:
             aa_transform = star_cloud_alignment(ref_img, ref_header, ref_wcs, sec_img, sec_header, sec_wcs)
             registered, footprint = astroalign.apply_transform(aa_transform, sec_img, ref_img)
@@ -199,6 +199,16 @@ def align_to_reference(sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wc
             logger.warning(f"WARNING: Star cloud alignment failed for {target} ({filtername}). Falling back to header WCS.")
             aligned, footprint = reproject_adaptive((sec_img, sec_wcs), ref_wcs, shape_out=np.shape(ref_img))
     return aligned
+
+
+def _normalize_channel(img):
+    """Normalize a single image to [0, 1] via the same ZScale stretch used
+    for the greyscale outputs, so channels with different native flux
+    scales combine without a color cast."""
+    interval = ZScaleInterval(contrast=0.35, max_iterations=5)
+    vmin, vmax = interval.get_limits(img)
+    norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=LinearStretch(), clip=True)
+    return norm(img)
 
 
 def make_logger(name, filename, level=logging.INFO):
@@ -386,9 +396,15 @@ for eff_data_dir, eff_out_dir, target in all_targets:
         # Green channel synthesised as the average of red and blue since only
         # two science filters are available.
         G = 0.5 * (R + B)
+        RGB_img = make_rgb(R, G, B, interval=ManualInterval(vmin=0, vmax=0.03))
     else:
         R, G, B = aligned[filters[0]], aligned[filters[1]], aligned[filters[2]]
-    RGB_img = make_rgb(R, G, B, interval=ManualInterval(vmin=0, vmax=0.03))
+        # Each filter has its own native flux scale (throughput, exposure
+        # time, sometimes instrument); normalize independently before
+        # compositing so relative brightness differences don't appear as a
+        # color cast.
+        RGB_img = make_rgb(_normalize_channel(R), _normalize_channel(G), _normalize_channel(B),
+                           interval=ManualInterval(vmin=0, vmax=1))
 
     fig = plt.figure(figsize=(15,15))
     ax = plt.subplot(projection=ref_wcs)
