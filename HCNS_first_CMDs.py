@@ -182,10 +182,24 @@ def col_comp_func(col, tran, plat, alpha):
 
 R_WFC3_F814W = 1.536 # WFC3 values from Schlafly and Finkbeiner (2011)
 R_WFC3_F606W = 2.488
+R_WFC3_F555W = 2.855
+R_WFC3_F475W = 3.248
 R_ACS_F814W =  1.526 # ACS values from Schlafly and Finkbeiner (2011)
-R_ACS_F606W = 2.471 
+R_ACS_F606W = 2.471
+R_ACS_F555W = 2.792
+R_ACS_F475W = 3.268
 R_I = 1.505 # Landolt values from Schlafly and Finkbeiner (2011)
 R_V = 2.742
+
+# Looked up by (instrument, filter) so the correct coefficient is applied
+# regardless of which blue filter HCNS_dolphot.py's BLUE_FILTER_PREFERENCE
+# actually selected for a given target (F606W, F555W, or F475W).
+EXTINCTION_COEFFS = {
+    ('ACS', 'F814W'): R_ACS_F814W, ('ACS', 'F606W'): R_ACS_F606W,
+    ('ACS', 'F555W'): R_ACS_F555W, ('ACS', 'F475W'): R_ACS_F475W,
+    ('WFC3', 'F814W'): R_WFC3_F814W, ('WFC3', 'F606W'): R_WFC3_F606W,
+    ('WFC3', 'F555W'): R_WFC3_F555W, ('WFC3', 'F475W'): R_WFC3_F475W,
+}
 
 max_mag = 30.
 max_sharp = 0.1
@@ -368,6 +382,26 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         ref_hdu = fits.open(ref_drc_imgfile)
         ref_WCS = WCS(ref_hdu[1].header,naxis=2)
 
+        # Determine the actual blue filter dolphot used for this target, from
+        # the reduction directory's DRC files (which only contain the 2
+        # filters HCNS_dolphot.py's BLUE_FILTER_PREFERENCE selected) -- this
+        # may not be F606W for archival targets lacking that filter.
+        reduct_drizfilelist = glob.glob(os.path.join(eff_reduct_dir, target, '*drc.fits'))
+        reduct_filters = set()
+        for imgpath in reduct_drizfilelist:
+            hdu = fits.open(imgpath)
+            header = hdu[0].header
+            match instrument:
+                case 'WFC3':
+                    reduct_filters.add(header['FILTER'])
+                case 'ACS':
+                    if 'CLEAR' not in header['FILTER1']:
+                        reduct_filters.add(header['FILTER1'])
+                    elif 'CLEAR' not in header['FILTER2']:
+                        reduct_filters.add(header['FILTER2'])
+            hdu.close()
+        blue_filter = next((f for f in reduct_filters if f != 'F814W'), 'F606W')
+
         #Calculate extinction corrections
         sfd = SFDQuery()
         # Dolphot reports 1-indexed pixel coordinates offset by +0.5 relative to the
@@ -378,13 +412,8 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         dolphot_cat['ra'] = coords.ra.deg
         dolphot_cat['dec'] = coords.dec.deg
         dolphot_cat['E(B-V)'] = sfd(coords)
-        match instrument:
-            case 'ACS':
-                dolphot_cat['A_F814W'] = dolphot_cat['E(B-V)']*R_ACS_F814W
-                dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)']*R_ACS_F606W
-            case 'WFC3':
-                dolphot_cat['A_F814W'] = dolphot_cat['E(B-V)']*R_WFC3_F814W
-                dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)']*R_WFC3_F606W
+        dolphot_cat['A_F814W'] = dolphot_cat['E(B-V)'] * EXTINCTION_COEFFS[(instrument, 'F814W')]
+        dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)'] * EXTINCTION_COEFFS[(instrument, blue_filter)]
         dolphot_cat['A_I'] = dolphot_cat['E(B-V)']*R_I
         dolphot_cat['A_V'] = dolphot_cat['E(B-V)']*R_V
         dolphot_cat['F814W_0'] = dolphot_cat[28] - dolphot_cat['A_F814W']
