@@ -538,7 +538,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             x_tmp = numpy.arange(-1.,2.0,0.01)
             plt.plot(x_tmp,col_comp_func(x_tmp,fit90[0][0],fit90[0][1],fit90[0][2]))
             plt.plot(x_tmp,fit50[0][0]*x_tmp + fit50[0][1])
-        except ValueError:
+        except (ValueError, RuntimeError):
             global_logger.warning(f'Completeness limit fit failed for {target}.')
         
         plt.scatter(colbins[:-1]+0.5*colwid,C90)
@@ -628,7 +628,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             x_tmp = numpy.arange(-1., 2.0, 0.01)
             plt.plot(x_tmp, col_comp_func(x_tmp, fit90[0][0], fit90[0][1], fit90[0][2]))
             plt.plot(x_tmp, fit50[0][0]*x_tmp + fit50[0][1])
-        except ValueError:
+        except (ValueError, RuntimeError):
             global_logger.warning(
                 f'Completeness limit fit failed for {target} (full AST catalog).')
         plt.scatter(colbins[:-1]+0.5*colwid, C90)
