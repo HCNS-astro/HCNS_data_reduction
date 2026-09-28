@@ -457,7 +457,10 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         hcns_sample = hcns_sample.set_index('Name')
 
         try:
-            target_ra, target_dec, target_re = hcns_sample['RA'][target],hcns_sample['Dec'][target],hcns_sample['r_e_arcsec'][target]
+            target_key = target.upper()
+            target_ra, target_dec, target_re = (hcns_sample['RA'][target_key],
+                                                hcns_sample['Dec'][target_key],
+                                                hcns_sample['r_e_arcsec'][target_key])
     
             target_pos = SkyCoord(ra=target_ra*u.deg, dec=target_dec*u.deg)
     
