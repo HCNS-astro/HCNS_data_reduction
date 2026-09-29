@@ -190,6 +190,7 @@ R_ACS_F555W = 2.792
 R_ACS_F475W = 3.268
 R_I = 1.505 # Landolt values from Schlafly and Finkbeiner (2011)
 R_V = 2.742
+R_B = 3.626
 
 # Looked up by (instrument, filter) so the correct coefficient is applied
 # regardless of which blue filter HCNS_dolphot.py's BLUE_FILTER_PREFERENCE
@@ -201,51 +202,219 @@ EXTINCTION_COEFFS = {
     ('WFC3', 'F555W'): R_WFC3_F555W, ('WFC3', 'F475W'): R_WFC3_F475W,
 }
 
+# Dolphot's "Transformed UBVRI magnitude" column doesn't say which Johnson
+# letter it corresponds to -- that's a dolphot convention, not written
+# anywhere in the .columns file. Looked up here instead.
+JOHNSON_LETTER = {
+    'F606W': 'V',
+    'F555W': 'V',
+    'F475W': 'B',
+    'F814W': 'I',
+}
+JOHNSON_EXTINCTION = {'V': R_V, 'B': R_B, 'I': R_I}
+
 max_mag = 30.
 max_sharp = 0.1
 crowd_thresh = 1.0
 
 
-def _process_fake_catalog(df_raw, Nimages):
-    """Rename dolphot .fake columns and apply standard quality cuts.
+def _parse_dolphot_columns(columns_file):
+    """Parse a dolphot ``.columns`` file into a rename map plus filter info.
 
     Parameters
     ----------
-    df_raw : pandas.DataFrame
-        Raw whitespace-separated DataFrame read directly from a ``.fake`` file.
-    Nimages : int
-        Number of input images, used to compute column index offsets.
+    columns_file : str
+        Path to the ``.columns`` file dolphot writes alongside its
+        photometry output.
+
+    Returns
+    -------
+    dict
+        Maps 0-indexed normal-format column position to a short name:
+        ``'x'``, ``'y'``, ``'SNR_global'``, ``'type'``, and per filter
+        ``'{filt}_mag'``, ``'{filt}_{letter}vega'`` (or ``'{filt}_UBVRI'`` if
+        the filter has no entry in ``JOHNSON_LETTER``), ``'e_{filt}'``,
+        ``'SNR_{filt}'``, ``'sharp_{filt}'``, ``'crowd_{filt}'``.
+        Unrecognised columns (chi, extension, chip, ...) are absent from
+        the map.
+    list of str
+        Combined-block filters found, in the order dolphot reported them.
+    list of str
+        One entry per per-exposure image slot (length = number of images
+        dolphot used, i.e. ``Nimg``), giving that slot's filter, in the same
+        img1...imgN order dolphot declared them.
+    """
+    if not os.path.isfile(columns_file):
+        raise FileNotFoundError(
+            f'{columns_file} not found; cannot auto-detect dolphot columns.')
+
+    GLOBAL_PREFIXES = {
+        'Object X position': 'x',
+        'Object Y position': 'y',
+        'Object type': 'type',
+    }
+    FILTER_FIELDS = {
+        'Instrumental VEGAMAG magnitude': 'mag',
+        'Transformed UBVRI magnitude': 'vega',
+        'Magnitude uncertainty': 'e',
+        'Signal-to-noise': 'SNR',
+        'Sharpness': 'sharp',
+        'Crowding': 'crowd',
+    }
+
+    rename = {}
+    filters_found = []
+    image_filters = []
+    with open(columns_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            num_str, sep, desc = line.partition('.')
+            if not sep or not num_str.strip().isdigit():
+                continue
+            col_index = int(num_str.strip()) - 1
+            desc = desc.strip()
+
+            # Global signal-to-noise has no comma suffix; distinguish from
+            # the per-filter "Signal-to-noise, <inst>_<filter>" below.
+            if desc == 'Signal-to-noise':
+                rename[col_index] = 'SNR_global'
+                continue
+
+            matched_global = False
+            for prefix, short in GLOBAL_PREFIXES.items():
+                if desc.startswith(prefix):
+                    rename[col_index] = short
+                    matched_global = True
+                    break
+            if matched_global:
+                continue
+
+            # Per-exposure columns carry a "(<filter>, <exptime> sec)"
+            # suffix; only the combined per-filter blocks (no parentheses)
+            # are used for the rename map, but each per-exposure block's
+            # first column marks a new image slot -- record its filter.
+            if '(' in desc:
+                if desc.startswith('Measured counts'):
+                    filt_tag = desc.rpartition('(')[2].split(',')[0].strip()
+                    _, _, filtername = filt_tag.rpartition('_')
+                    image_filters.append(filtername)
+                continue
+            if ', ' not in desc:
+                continue
+
+            field_desc, _, filt_tag = desc.rpartition(', ')
+            if '_' not in filt_tag or field_desc not in FILTER_FIELDS:
+                continue
+            _, _, filtername = filt_tag.rpartition('_')
+
+            if filtername not in filters_found:
+                filters_found.append(filtername)
+
+            short = FILTER_FIELDS[field_desc]
+            if short == 'mag':
+                name = f'{filtername}_mag'
+            elif short == 'vega':
+                letter = JOHNSON_LETTER.get(filtername)
+                if letter is None:
+                    global_logger.warning(
+                        f'No Johnson-letter mapping for {filtername}; '
+                        f'using generic "{filtername}_UBVRI" column name.')
+                    name = f'{filtername}_UBVRI'
+                else:
+                    name = f'{filtername}_{letter}vega'
+            else:
+                name = f'{short}_{filtername}'
+            rename[col_index] = name
+
+    if not filters_found:
+        raise ValueError(f'No filter columns found in {columns_file}.')
+
+    return rename, filters_found, image_filters
+
+
+def _read_dolphot_catalog(catalog_path):
+    """Read a dolphot photometry catalog, auto-detecting column names from
+    the companion ``<catalog_path>.columns`` file dolphot writes alongside
+    its output.
+
+    Column positions -- and which filters are present -- can change between
+    dolphot versions or if the pipeline is ever run with more than two
+    filters, so nothing about the layout is hardcoded here.
+
+    Parameters
+    ----------
+    catalog_path : str
+        Path to the dolphot photometry output file (no extension).
 
     Returns
     -------
     pandas.DataFrame
-        Tidy DataFrame with named columns and a ``recovered`` flag column,
-        matching the schema of ``phot_ast.csv``.
+        Catalog with columns renamed per ``_parse_dolphot_columns``.
+    list of str
+        Filters found, in the order dolphot reported them.
     """
-    c1 = 5 + Nimages
-    c2 = c1 + Nimages + 3
-    c3 = c2 + 6 + 5
-    c4 = c3 + 8 + 5
-    df = df_raw.rename(columns={
-        2: 'x', 3: 'y', 5: 'F606W_in', c1: 'F814W_in',
-        c2: 'chi', c2+1: 'SNR', c2+2: 'sharpness', c2+3: 'roundness',
-        c2+4: 'pa', c2+5: 'crowding', c2+6: 'type',
-        c3: 'F606W_out', c3+1: 'V_out', c3+2: 'err_F606W_out',
-        c3+3: 'chi_F606W', c3+4: 'SNR_F606W', c3+5: 'sharpness_F606W',
-        c3+6: 'roundness_F606W', c3+7: 'crowding_F606W', c3+8: 'flag_F606W',
-        c4: 'F814W_out', c4+1: 'I_out', c4+2: 'err_F814W_out',
-        c4+3: 'chi_F814W', c4+4: 'SNR_F814W', c4+5: 'sharpness_F814W',
-        c4+6: 'roundness_F814W', c4+7: 'crowding_F814W', c4+8: 'flag_F814W',
-    })
-    condition = ((df['F606W_out'] < 99.) & (df['F814W_out'] < 99.) &
-                 (df['type'] < 3) &
-                 (df['crowding_F606W'] + df['crowding_F814W'] < crowd_thresh) &
-                 ((df['sharpness_F606W'] + df['sharpness_F814W'])**2. < max_sharp))
+    rename, filters_found, _ = _parse_dolphot_columns(catalog_path + '.columns')
+    df = pandas.read_csv(catalog_path, sep=r'\s+', header=None)
+    df = df.rename(columns=rename)
+    return df, filters_found
+
+
+def _read_fake_catalog(fake_path, catalog_path):
+    """Read a dolphot artificial-star (``.fake``) catalog, auto-detecting
+    column names from the companion ``<catalog_path>.columns`` file (the
+    *normal* photometry catalog's columns file -- per the dolphot manual,
+    ".fake" output uses the same format as normal photometry, except that
+    the true position (on the reference frame) and true brightness (on
+    each image) are prepended to the start of the line").
+
+    Parameters
+    ----------
+    fake_path : str
+        Path to the ``.fake`` file to read.
+    catalog_path : str
+        Path to the corresponding normal photometry output file (no
+        extension) -- used only to locate ``<catalog_path>.columns``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns ``'x'``, ``'y'`` (true position), ``'{filt}_in'`` (true
+        injected magnitude) and ``'{filt}_mag'``/``'SNR_{filt}'`` (recovered
+        photometry) per filter, ``'SNR'`` (global), and ``'recovered'`` (1 if
+        the star passed the same quality cuts as the main catalog, else 0).
+    list of str
+        Filters found, in the order dolphot reported them.
+    """
+    rename, filters_found, image_filters = _parse_dolphot_columns(catalog_path + '.columns')
+    n_images = len(image_filters)
+    offset = 4 + 2 * n_images
+
+    df_raw = pandas.read_csv(fake_path, sep=r'\s+', header=None)
+
+    df = pandas.DataFrame(index=df_raw.index)
+    for col_index, name in rename.items():
+        df[name] = df_raw[col_index + offset]
+    for filt in filters_found:
+        first_slot = image_filters.index(filt)
+        df[f'{filt}_in'] = df_raw[4 + 2*first_slot + 1]
+    # True position (columns 2, 3) is set last: 'x'/'y' are also produced by
+    # the recovered-column rename above (dolphot's own X/Y fields), which
+    # must not win over the true position here.
+    df['x'] = df_raw[2] - 0.5
+    df['y'] = df_raw[3] - 0.5
+
+    condition = numpy.ones(len(df), dtype=bool)
+    for filt in filters_found:
+        condition &= (df[f'{filt}_mag'] < 99.)
+    condition &= (df['type'] < 3)
+    condition &= (sum(df[f'crowd_{filt}'] for filt in filters_found) < crowd_thresh)
+    condition &= (sum(df[f'sharp_{filt}'] for filt in filters_found)**2. < max_sharp)
     df['recovered'] = numpy.where(condition, 1, 0)
-    df['x'] = numpy.array(df['x']) - 0.5
-    df['y'] = numpy.array(df['y']) - 0.5
-    return df[['x', 'y', 'F606W_in', 'F814W_in', 'F606W_out', 'F814W_out',
-               'SNR', 'SNR_F606W', 'SNR_F814W', 'recovered']]
+    df['SNR'] = df['SNR_global']
+
+    return df, filters_found
 
 
 # HCNS targets -- exclude the 'archival' subdirectory
@@ -273,18 +442,15 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     os.makedirs(os.path.join(eff_out_dir, target), exist_ok=True)
     target_dir = os.path.join(eff_data_dir, target)
     phot_pars_file = os.path.join(eff_reduct_dir, target, 'phot_pars')
-    Nimages = None
     ref_rootname = None
     if os.path.isfile(phot_pars_file):
         with open(phot_pars_file) as f:
             for line in f:
-                if line.startswith('Nimg='):
-                    Nimages = int(line.strip().split('=', 1)[1])
-                elif line.startswith('img0_file='):
+                if line.startswith('img0_file='):
                     val = line.strip().split('=', 1)[1].strip()
                     ref_rootname = val.rsplit('.chip', 1)[0]
     else:
-        global_logger.warning(f'phot_pars not found for {target}. Falling back to Nimages=8 and F814W reference.')
+        global_logger.warning(f'phot_pars not found for {target}. Falling back to filterdrizimg[1] as WCS reference.')
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     instrument = None
     for imgpath in drizfilelist:
@@ -305,32 +471,45 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     _fake_00  = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_00.fake')
     ast_file  = _fake_std if os.path.isfile(_fake_std) else _fake_00
 
+    # Determine blue/red filters once per target (needed by both the main
+    # catalog block and the AST blocks below, which can run independently
+    # of each other), from the .columns file dolphot wrote when it ran.
+    red_filter = 'F814W'
+    blue_filter = None
+    columns_file = dolphot_outfile + '.columns'
+    if os.path.isfile(columns_file):
+        _, cat_filters, _ = _parse_dolphot_columns(columns_file)
+        blue_filter = next((f for f in cat_filters if f != red_filter), None)
+
     if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")) and
             (not os.path.isfile(os.path.join(eff_out_dir, target, 'phot_target_initial.csv')) or args.overwrite)):
 
-        dolphot_cat = pandas.read_csv(dolphot_outfile, sep=r'\s+', header=None)
+        if blue_filter is None:
+            global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping.')
+            continue
 
-        # All column IDs are hard-coded for ACS/WFC3 with two filters
+        dolphot_cat, cat_filters = _read_dolphot_catalog(dolphot_outfile)
+
         global_logger.info(f"Generating CMDs for {target}.")
         global_logger.info(f"Total dolphot catalog length: {len(dolphot_cat)}")
 
         global_logger.info(f"Remove sources that are not type 1 or 2 (point-like).")
-        condition = (dolphot_cat[10] < 3)
+        condition = (dolphot_cat['type'] < 3)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: mag < {max_mag} (in all filters)")
-        condition = (dolphot_cat[15] < max_mag) & (dolphot_cat[28] < max_mag)
+        condition = (dolphot_cat[f'{blue_filter}_mag'] < max_mag) & (dolphot_cat[f'{red_filter}_mag'] < max_mag)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: crowding < {crowd_thresh} mag")
-        condition = (dolphot_cat[22] + dolphot_cat[35] < crowd_thresh)
+        condition = (dolphot_cat[f'crowd_{blue_filter}'] + dolphot_cat[f'crowd_{red_filter}'] < crowd_thresh)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
         global_logger.info(f"Require: sharpness squared < {max_sharp}")
-        condition = ((dolphot_cat[20] + dolphot_cat[33])**2. < max_sharp)
+        condition = ((dolphot_cat[f'sharp_{blue_filter}'] + dolphot_cat[f'sharp_{red_filter}'])**2. < max_sharp)
         dolphot_cat = dolphot_cat[condition]
         global_logger.info(f"New catalogue length: {len(dolphot_cat)}")
 
@@ -382,65 +561,56 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         ref_hdu = fits.open(ref_drc_imgfile)
         ref_WCS = WCS(ref_hdu[1].header,naxis=2)
 
-        # Determine the actual blue filter dolphot used for this target, from
-        # the reduction directory's DRC files (which only contain the 2
-        # filters HCNS_dolphot.py's BLUE_FILTER_PREFERENCE selected) -- this
-        # may not be F606W for archival targets lacking that filter.
-        reduct_drizfilelist = glob.glob(os.path.join(eff_reduct_dir, target, '*drc.fits'))
-        reduct_filters = set()
-        for imgpath in reduct_drizfilelist:
-            hdu = fits.open(imgpath)
-            header = hdu[0].header
-            match instrument:
-                case 'WFC3':
-                    reduct_filters.add(header['FILTER'])
-                case 'ACS':
-                    if 'CLEAR' not in header['FILTER1']:
-                        reduct_filters.add(header['FILTER1'])
-                    elif 'CLEAR' not in header['FILTER2']:
-                        reduct_filters.add(header['FILTER2'])
-            hdu.close()
-        blue_filter = next((f for f in reduct_filters if f != 'F814W'), 'F606W')
-
         #Calculate extinction corrections
         sfd = SFDQuery()
         # Dolphot reports 1-indexed pixel coordinates offset by +0.5 relative to the
         # standard 0-indexed FITS convention; subtract 0.5 to recover the correct position.
-        coords = pixel_to_skycoord(numpy.array(dolphot_cat[2])-0.5, numpy.array(dolphot_cat[3])-0.5, ref_WCS)
-        dolphot_cat['x'] = numpy.array(dolphot_cat[2])-0.5
-        dolphot_cat['y'] = numpy.array(dolphot_cat[3])-0.5
+        coords = pixel_to_skycoord(numpy.array(dolphot_cat['x'])-0.5, numpy.array(dolphot_cat['y'])-0.5, ref_WCS)
+        dolphot_cat['x'] = numpy.array(dolphot_cat['x'])-0.5
+        dolphot_cat['y'] = numpy.array(dolphot_cat['y'])-0.5
         dolphot_cat['ra'] = coords.ra.deg
         dolphot_cat['dec'] = coords.dec.deg
         dolphot_cat['E(B-V)'] = sfd(coords)
-        dolphot_cat['A_F814W'] = dolphot_cat['E(B-V)'] * EXTINCTION_COEFFS[(instrument, 'F814W')]
-        dolphot_cat['A_F606W'] = dolphot_cat['E(B-V)'] * EXTINCTION_COEFFS[(instrument, blue_filter)]
-        dolphot_cat['A_I'] = dolphot_cat['E(B-V)']*R_I
-        dolphot_cat['A_V'] = dolphot_cat['E(B-V)']*R_V
-        dolphot_cat['F814W_0'] = dolphot_cat[28] - dolphot_cat['A_F814W']
-        dolphot_cat['F606W_0'] = dolphot_cat[15] - dolphot_cat['A_F606W']
-        dolphot_cat['I_0'] = dolphot_cat[29] - dolphot_cat['A_I']
-        dolphot_cat['V_0'] = dolphot_cat[16] - dolphot_cat['A_V']
-        dolphot_cat['e_F814W'] = dolphot_cat[30]
-        dolphot_cat['e_F606W'] = dolphot_cat[17]
-        dolphot_cat['SNR'] = dolphot_cat[5]
-        dolphot_cat['SNR_F606W'] = dolphot_cat[19]
-        dolphot_cat['SNR_F814W'] = dolphot_cat[32]
+        dolphot_cat[f'A_{red_filter}'] = dolphot_cat['E(B-V)'] * EXTINCTION_COEFFS[(instrument, red_filter)]
+        dolphot_cat[f'A_{blue_filter}'] = dolphot_cat['E(B-V)'] * EXTINCTION_COEFFS[(instrument, blue_filter)]
+        dolphot_cat[f'{red_filter}_0'] = dolphot_cat[f'{red_filter}_mag'] - dolphot_cat[f'A_{red_filter}']
+        dolphot_cat[f'{blue_filter}_0'] = dolphot_cat[f'{blue_filter}_mag'] - dolphot_cat[f'A_{blue_filter}']
+        dolphot_cat['SNR'] = dolphot_cat['SNR_global']
 
-        dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
-                                   'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I',
-                                   'SNR','SNR_F606W','SNR_F814W']]
+        # Johnson-system (UBVRI) columns, named after whichever letter each
+        # filter actually maps to (see JOHNSON_LETTER); skipped with a
+        # warning if a filter has no known Johnson extinction coefficient.
+        out_cols = ['x', 'y', 'ra', 'dec',
+                   f'{blue_filter}_0', f'e_{blue_filter}', f'{red_filter}_0', f'e_{red_filter}']
+        for filt in (blue_filter, red_filter):
+            letter = JOHNSON_LETTER.get(filt)
+            if letter is not None and letter in JOHNSON_EXTINCTION:
+                dolphot_cat[f'A_{letter}'] = dolphot_cat['E(B-V)'] * JOHNSON_EXTINCTION[letter]
+                dolphot_cat[f'{letter}_0'] = dolphot_cat[f'{filt}_{letter}vega'] - dolphot_cat[f'A_{letter}']
+                out_cols.append(f'{letter}_0')
+            else:
+                global_logger.warning(f'No Johnson extinction coefficient for {filt}; skipping its UBVRI column.')
+        out_cols.append('E(B-V)')
+        out_cols += [f'A_{blue_filter}', f'A_{red_filter}']
+        for filt in (blue_filter, red_filter):
+            letter = JOHNSON_LETTER.get(filt)
+            if letter is not None and letter in JOHNSON_EXTINCTION:
+                out_cols.append(f'A_{letter}')
+        out_cols += ['SNR', f'SNR_{blue_filter}', f'SNR_{red_filter}']
+
+        dolphot_cat = dolphot_cat[out_cols]
         phot_outfile = os.path.join(eff_out_dir,target,'phot_full.csv')
         global_logger.info(f'Saving full FoV photometry catalog to {phot_outfile}.')
         dolphot_cat.to_csv(phot_outfile,index=False)
 
 
         plt.figure(figsize=(4,8))
-        plt.scatter(dolphot_cat['F606W_0']-dolphot_cat['F814W_0'], dolphot_cat['F814W_0'],c='k',s=3,marker='o')
+        plt.scatter(dolphot_cat[f'{blue_filter}_0']-dolphot_cat[f'{red_filter}_0'], dolphot_cat[f'{red_filter}_0'],c='k',s=3,marker='o')
         plt.ylim(27.5,20)
         plt.xlim(-0.5,1.5)
         plt.title(f'{target} Full Field')
-        plt.xlabel(r'F606W$_0$ - F814W$_0$')
-        plt.ylabel('F814W$_0$')
+        plt.xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
+        plt.ylabel(f'{red_filter}$_0$')
         plt.savefig(os.path.join(eff_out_dir,target,'CMD_full.pdf'),bbox_inches='tight')
         plt.close()
 
@@ -467,20 +637,18 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             dolphot_cat['separation'] = target_pos.separation(coords).arcsec
             dolphot_cat = dolphot_cat[dolphot_cat['separation'] < 2.*target_re]
     
-            dolphot_cat = dolphot_cat[['x','y','ra','dec','F606W_0','e_F606W','F814W_0','e_F814W',
-                                       'V_0','I_0','E(B-V)','A_F606W','A_F814W','A_V','A_I',
-                                       'SNR','SNR_F606W','SNR_F814W']]
+            dolphot_cat = dolphot_cat[out_cols]
             phot_outfile = os.path.join(eff_out_dir,target,'phot_target_initial.csv')
             global_logger.info(f'Saving initial target photometry catalog to {phot_outfile}.')
             dolphot_cat.to_csv(phot_outfile,index=False)
-    
+
             plt.figure(figsize=(4,8))
-            plt.scatter(dolphot_cat['F606W_0']-dolphot_cat['F814W_0'], dolphot_cat['F814W_0'],c='k',s=3,marker='o')
+            plt.scatter(dolphot_cat[f'{blue_filter}_0']-dolphot_cat[f'{red_filter}_0'], dolphot_cat[f'{red_filter}_0'],c='k',s=3,marker='o')
             plt.ylim(27.5,20)
             plt.xlim(-0.5,1.5)
             plt.title(f'{target} (Initial)')
-            plt.xlabel(r'F606W$_0$ - F814W$_0$')
-            plt.ylabel('F814W$_0$')
+            plt.xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
+            plt.ylabel(f'{red_filter}$_0$')
             plt.savefig(os.path.join(eff_out_dir,target,'CMD_initial.pdf'),bbox_inches='tight')
             plt.close()
         except:
@@ -491,12 +659,11 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     if (os.path.isfile(os.path.join(eff_reduct_dir, target, "fakestars.done")) and
             (not os.path.isfile(os.path.join(eff_out_dir, target, 'phot_ast.csv')) or args.overwrite)):
 
-        # Now create file for fake stars
-        if Nimages is None:
-            global_logger.warning(f'Could not read Nimg from phot_pars for {target}. Falling back to Nimages=8.')
-            Nimages = 8
-        fake_stars = _process_fake_catalog(
-            pandas.read_csv(ast_file, sep=r'\s+', header=None), Nimages)
+        if blue_filter is None:
+            global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping AST.')
+            continue
+
+        fake_stars, _ = _read_fake_catalog(ast_file, dolphot_outfile)
 
         global_logger.info(f'Fake star catalog length for {target}: {len(fake_stars)}')
         global_logger.info(f'Recovery fraction: {numpy.sum(fake_stars["recovered"])/len(fake_stars)}')
@@ -522,16 +689,16 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         C50 = numpy.zeros(len(colbins)-1)
 
         global_logger.info(f'Fitting completeness limits for {target}.')
-        fake_stars['F606W-F814W'] = fake_stars['F606W_in']-fake_stars['F814W_in']
+        fake_stars['color_in'] = fake_stars[f'{blue_filter}_in']-fake_stars[f'{red_filter}_in']
         for c in range(len(colbins)-1):
-            condition = ((fake_stars['F606W-F814W'] < colbins[c+1]) & (fake_stars['F606W-F814W'] > colbins[c]))
+            condition = ((fake_stars['color_in'] < colbins[c+1]) & (fake_stars['color_in'] > colbins[c]))
             fake_stars_colbin = fake_stars[condition]
 
             comp = numpy.zeros(len(m_bins)-1)
             cnts = numpy.zeros(len(m_bins)-1)
 
             for i in fake_stars_colbin.index:
-                j = int(max(min(len(m_bins)-2,numpy.floor((fake_stars_colbin['F814W_in'][i]-m_min)/m_wid)),0))
+                j = int(max(min(len(m_bins)-2,numpy.floor((fake_stars_colbin[f'{red_filter}_in'][i]-m_min)/m_wid)),0))
                 if fake_stars_colbin['recovered'][i] > 0:
                     comp[j] += 1.
                 cnts[j] += 1.
@@ -576,8 +743,8 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         plt.scatter(colbins[:-1]+0.5*colwid,C90)
         plt.scatter(colbins[:-1]+0.5*colwid,C50)
         plt.ylim(29,24)
-        plt.ylabel('F814W')
-        plt.xlabel('F606W-F814W')
+        plt.ylabel(red_filter)
+        plt.xlabel(f'{blue_filter}-{red_filter}')
         plt.savefig(os.path.join(eff_out_dir,target,'completeness.pdf'),bbox_inches='tight')
         plt.close()
 
@@ -595,14 +762,15 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
     if (extra_fake_files and
             os.path.isfile(os.path.join(eff_out_dir, target, 'phot_ast.csv')) and
             (_new_extra or not os.path.isfile(ast_full_path) or args.overwrite)):
-        if Nimages is None:
-            Nimages = 8
+        if blue_filter is None:
+            global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping extra ASTs.')
+            continue
         global_logger.info(
             f'{len(extra_fake_files)} extra AST file(s) found for {target}. Building full catalog.')
         dfs = [pandas.read_csv(os.path.join(eff_out_dir, target, 'phot_ast.csv'))]
         for ef in extra_fake_files:
-            dfs.append(_process_fake_catalog(
-                pandas.read_csv(ef, sep=r'\s+', header=None), Nimages))
+            extra_df, _ = _read_fake_catalog(ef, dolphot_outfile)
+            dfs.append(extra_df)
         fake_stars_full = pandas.concat(dfs, ignore_index=True)
         global_logger.info(f'Full AST catalog for {target}: {len(fake_stars_full)} stars.')
         fake_stars_full.to_csv(ast_full_path, index=False)
@@ -620,16 +788,16 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         C50 = numpy.zeros(len(colbins)-1)
 
         global_logger.info(f'Fitting completeness limits for {target} (full AST catalog).')
-        fake_stars_full['F606W-F814W'] = fake_stars_full['F606W_in'] - fake_stars_full['F814W_in']
+        fake_stars_full['color_in'] = fake_stars_full[f'{blue_filter}_in'] - fake_stars_full[f'{red_filter}_in']
         for c in range(len(colbins)-1):
-            condition = ((fake_stars_full['F606W-F814W'] < colbins[c+1]) &
-                         (fake_stars_full['F606W-F814W'] > colbins[c]))
+            condition = ((fake_stars_full['color_in'] < colbins[c+1]) &
+                         (fake_stars_full['color_in'] > colbins[c]))
             fake_stars_colbin = fake_stars_full[condition]
             comp = numpy.zeros(len(m_bins)-1)
             cnts  = numpy.zeros(len(m_bins)-1)
             for i in fake_stars_colbin.index:
                 j = int(max(min(len(m_bins)-2,
-                               numpy.floor((fake_stars_colbin['F814W_in'][i]-m_min)/m_wid)), 0))
+                               numpy.floor((fake_stars_colbin[f'{red_filter}_in'][i]-m_min)/m_wid)), 0))
                 if fake_stars_colbin['recovered'][i] > 0:
                     comp[j] += 1.
                 cnts[j] += 1.
@@ -666,8 +834,8 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         plt.scatter(colbins[:-1]+0.5*colwid, C90)
         plt.scatter(colbins[:-1]+0.5*colwid, C50)
         plt.ylim(29, 24)
-        plt.ylabel('F814W')
-        plt.xlabel('F606W-F814W')
+        plt.ylabel(red_filter)
+        plt.xlabel(f'{blue_filter}-{red_filter}')
         plt.savefig(os.path.join(eff_out_dir, target, 'completeness.pdf'), bbox_inches='tight')
         plt.close()
 
