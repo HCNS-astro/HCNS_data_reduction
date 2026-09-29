@@ -35,7 +35,7 @@ else:
 # Edit this list to add or reorder acceptable blue-band filters.
 # ---------------------------------------------------------------------------
 RED_FILTER = 'F814W'
-BLUE_FILTER_PREFERENCE = ['F606W', 'F555W', 'F475W']
+BLUE_FILTER_PREFERENCE = ['F606W', 'F555W', 'F475W', 'F438W']
 
 
 def _header_filter(imgpath, instrument):

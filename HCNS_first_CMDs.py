@@ -184,6 +184,7 @@ R_WFC3_F814W = 1.536 # WFC3 values from Schlafly and Finkbeiner (2011)
 R_WFC3_F606W = 2.488
 R_WFC3_F555W = 2.855
 R_WFC3_F475W = 3.248
+R_WFC3_F438W = 3.623
 R_ACS_F814W =  1.526 # ACS values from Schlafly and Finkbeiner (2011)
 R_ACS_F606W = 2.471
 R_ACS_F555W = 2.792
@@ -194,12 +195,14 @@ R_B = 3.626
 
 # Looked up by (instrument, filter) so the correct coefficient is applied
 # regardless of which blue filter HCNS_dolphot.py's BLUE_FILTER_PREFERENCE
-# actually selected for a given target (F606W, F555W, or F475W).
+# actually selected for a given target (F606W, F555W, F475W, or F438W --
+# the last is WFC3-only; ACS has no F438W).
 EXTINCTION_COEFFS = {
     ('ACS', 'F814W'): R_ACS_F814W, ('ACS', 'F606W'): R_ACS_F606W,
     ('ACS', 'F555W'): R_ACS_F555W, ('ACS', 'F475W'): R_ACS_F475W,
     ('WFC3', 'F814W'): R_WFC3_F814W, ('WFC3', 'F606W'): R_WFC3_F606W,
     ('WFC3', 'F555W'): R_WFC3_F555W, ('WFC3', 'F475W'): R_WFC3_F475W,
+    ('WFC3', 'F438W'): R_WFC3_F438W,
 }
 
 # Dolphot's "Transformed UBVRI magnitude" column doesn't say which Johnson
@@ -212,6 +215,10 @@ JOHNSON_LETTER = {
     'F814W': 'I',
 }
 JOHNSON_EXTINCTION = {'V': R_V, 'B': R_B, 'I': R_I}
+# Dolphot only applies UBVRI transformations for ACS. WFC3 .columns files
+# still list a "Transformed UBVRI magnitude" column, but it is not a real
+# Johnson magnitude, so it is ignored for any instrument not listed here.
+JOHNSON_INSTRUMENTS = {'ACS'}
 
 max_mag = 30.
 max_sharp = 0.1
@@ -233,7 +240,8 @@ def _parse_dolphot_columns(columns_file):
         Maps 0-indexed normal-format column position to a short name:
         ``'x'``, ``'y'``, ``'SNR_global'``, ``'type'``, and per filter
         ``'{filt}_mag'``, ``'{filt}_{letter}vega'`` (or ``'{filt}_UBVRI'`` if
-        the filter has no entry in ``JOHNSON_LETTER``), ``'e_{filt}'``,
+        the filter has no entry in ``JOHNSON_LETTER``; omitted entirely for
+        instruments not in ``JOHNSON_INSTRUMENTS``), ``'e_{filt}'``,
         ``'SNR_{filt}'``, ``'sharp_{filt}'``, ``'crowd_{filt}'``.
         Unrecognised columns (chi, extension, chip, ...) are absent from
         the map.
@@ -307,12 +315,14 @@ def _parse_dolphot_columns(columns_file):
             field_desc, _, filt_tag = desc.rpartition(', ')
             if '_' not in filt_tag or field_desc not in FILTER_FIELDS:
                 continue
-            _, _, filtername = filt_tag.rpartition('_')
+            inst, _, filtername = filt_tag.rpartition('_')
 
             if filtername not in filters_found:
                 filters_found.append(filtername)
 
             short = FILTER_FIELDS[field_desc]
+            if short == 'vega' and inst not in JOHNSON_INSTRUMENTS:
+                continue
             if short == 'mag':
                 name = f'{filtername}_mag'
             elif short == 'vega':
@@ -682,23 +692,26 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
 
         # Johnson-system (UBVRI) columns, named after whichever letter each
         # filter actually maps to (see JOHNSON_LETTER); skipped with a
-        # warning if a filter has no known Johnson extinction coefficient.
+        # warning if a filter has no known Johnson extinction coefficient,
+        # and omitted entirely for instruments dolphot does not transform.
         out_cols = ['x', 'y', 'ra', 'dec',
                    f'{blue_filter}_0', f'e_{blue_filter}', f'{red_filter}_0', f'e_{red_filter}']
-        for filt in (blue_filter, red_filter):
-            letter = JOHNSON_LETTER.get(filt)
-            if letter is not None and letter in JOHNSON_EXTINCTION:
-                dolphot_cat[f'A_{letter}'] = dolphot_cat['E(B-V)'] * JOHNSON_EXTINCTION[letter]
-                dolphot_cat[f'{letter}_0'] = dolphot_cat[f'{filt}_{letter}vega'] - dolphot_cat[f'A_{letter}']
-                out_cols.append(f'{letter}_0')
-            else:
-                global_logger.warning(f'No Johnson extinction coefficient for {filt}; skipping its UBVRI column.')
+        johnson_letters = []
+        if instrument in JOHNSON_INSTRUMENTS:
+            for filt in (blue_filter, red_filter):
+                letter = JOHNSON_LETTER.get(filt)
+                if letter is not None and letter in JOHNSON_EXTINCTION:
+                    dolphot_cat[f'A_{letter}'] = dolphot_cat['E(B-V)'] * JOHNSON_EXTINCTION[letter]
+                    dolphot_cat[f'{letter}_0'] = dolphot_cat[f'{filt}_{letter}vega'] - dolphot_cat[f'A_{letter}']
+                    johnson_letters.append(letter)
+                else:
+                    global_logger.warning(f'No Johnson extinction coefficient for {filt}; skipping its UBVRI column.')
+        else:
+            global_logger.info(f'Dolphot provides no UBVRI transformation for {instrument}; omitting Johnson columns.')
+        out_cols += [f'{letter}_0' for letter in johnson_letters]
         out_cols.append('E(B-V)')
         out_cols += [f'A_{blue_filter}', f'A_{red_filter}']
-        for filt in (blue_filter, red_filter):
-            letter = JOHNSON_LETTER.get(filt)
-            if letter is not None and letter in JOHNSON_EXTINCTION:
-                out_cols.append(f'A_{letter}')
+        out_cols += [f'A_{letter}' for letter in johnson_letters]
         out_cols += ['SNR', f'SNR_{blue_filter}', f'SNR_{red_filter}']
 
         dolphot_cat = dolphot_cat[out_cols]
