@@ -417,6 +417,109 @@ def _read_fake_catalog(fake_path, catalog_path):
     return df, filters_found
 
 
+def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suffix='', min_snr=None, log_suffix=''):
+    """Fit color-dependent completeness curves from an AST catalog and save
+    ``completeness{suffix}.dat``/``completeness{suffix}.pdf``.
+
+    Parameters
+    ----------
+    fake_stars : pandas.DataFrame
+        AST catalog, as returned by ``_read_fake_catalog`` (or a
+        concatenation of several such catalogs).
+    blue_filter, red_filter : str
+        Filter names used for the colour and reference magnitude.
+    out_dir : str
+        Root output directory (target's own subdirectory is appended).
+    target : str
+        Target identifier, used for titles, filenames, and log messages.
+    suffix : str, optional
+        Appended to the output filenames, e.g. ``'_4sig'``. Default ``''``.
+    min_snr : float or None, optional
+        If given, a star only counts as recovered when it also satisfies
+        ``SNR_{blue_filter} >= min_snr`` and ``SNR_{red_filter} >= min_snr``,
+        in addition to the existing ``recovered`` criteria. The denominator
+        (total injected stars per bin) is unchanged -- only the recovered
+        count becomes stricter. Default ``None`` (no additional cut).
+    log_suffix : str, optional
+        Appended to log messages (e.g. ``' (full AST catalog)'``).
+        Default ``''``.
+    """
+    m_min = 21.
+    m_max = 30.
+    m_wid = 0.1
+    m_bins = numpy.arange(m_min, m_max+0.1*m_wid, m_wid)
+
+    colmax = 2.0
+    colmin = -1.0
+    colwid = 0.2
+    colbins = numpy.arange(colmin, colmax+0.1*colwid, colwid)
+
+    C90 = numpy.zeros(len(colbins)-1)
+    C50 = numpy.zeros(len(colbins)-1)
+
+    if min_snr is not None:
+        recovered = ((fake_stars['recovered'] > 0) &
+                    (fake_stars[f'SNR_{blue_filter}'] >= min_snr) &
+                    (fake_stars[f'SNR_{red_filter}'] >= min_snr))
+    else:
+        recovered = fake_stars['recovered'] > 0
+    mag_in = fake_stars[f'{red_filter}_in']
+    color_in = fake_stars[f'{blue_filter}_in'] - fake_stars[f'{red_filter}_in']
+
+    global_logger.info(f'Fitting completeness limits for {target}{log_suffix}.')
+    for c in range(len(colbins)-1):
+        condition = (color_in < colbins[c+1]) & (color_in > colbins[c])
+        fake_stars_colbin = fake_stars[condition]
+
+        comp = numpy.zeros(len(m_bins)-1)
+        cnts = numpy.zeros(len(m_bins)-1)
+
+        for i in fake_stars_colbin.index:
+            j = int(max(min(len(m_bins)-2, numpy.floor((mag_in[i]-m_min)/m_wid)), 0))
+            if recovered[i]:
+                comp[j] += 1.
+            cnts[j] += 1.
+
+        comp = comp/cnts
+        inx = numpy.where(comp > 0.4)[0]
+
+        try:
+            erf_fit = scipy.optimize.curve_fit(comp_func, m_bins[inx]+0.05, comp[inx], p0=[26.5,0.5],
+                                               sigma=1./numpy.sqrt(cnts[inx]), bounds=[[24.,0.1],[28.,3.]])
+            C90[c] = inv_comp_func(0.9, erf_fit[0][0], erf_fit[0][1])
+            C50[c] = erf_fit[0][0]
+        except ValueError:
+            C90[c] = numpy.nan
+            C50[c] = numpy.nan
+
+    try:
+        fit90 = scipy.optimize.curve_fit(col_comp_func, colbins[:-1]+0.5*colwid, C90, p0=[0.8,26.5,0.])
+        global_logger.info(f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
+
+        # 50% completeness varies nearly linearly with colour over this range, so a
+        # simple linear model is used rather than the piecewise model applied to 90%.
+        fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b, colbins[:-1]+0.5*colwid, C50, p0=[1,30])
+        global_logger.info(f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
+
+        with open(os.path.join(out_dir, target, f'completeness{suffix}.dat'), 'w') as f:
+            f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
+            f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
+
+        x_tmp = numpy.arange(colmin, colmax, 0.01)
+        plt.plot(x_tmp, col_comp_func(x_tmp, fit90[0][0], fit90[0][1], fit90[0][2]))
+        plt.plot(x_tmp, fit50[0][0]*x_tmp + fit50[0][1])
+    except (ValueError, RuntimeError):
+        global_logger.warning(f'Completeness limit fit failed for {target}{log_suffix}.')
+
+    plt.scatter(colbins[:-1]+0.5*colwid, C90)
+    plt.scatter(colbins[:-1]+0.5*colwid, C50)
+    plt.ylim(29, 24)
+    plt.ylabel(red_filter)
+    plt.xlabel(f'{blue_filter}-{red_filter}')
+    plt.savefig(os.path.join(out_dir, target, f'completeness{suffix}.pdf'), bbox_inches='tight')
+    plt.close()
+
+
 # HCNS targets -- exclude the 'archival' subdirectory
 all_targets = [(data_dir, reduct_dir, out_dir, os.path.basename(p))
                for p in glob.glob(os.path.join(data_dir, '*'))
@@ -607,7 +710,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         plt.figure(figsize=(4,8))
         plt.scatter(dolphot_cat[f'{blue_filter}_0']-dolphot_cat[f'{red_filter}_0'], dolphot_cat[f'{red_filter}_0'],c='k',s=3,marker='o')
         plt.ylim(27.5,20)
-        plt.xlim(-0.5,1.5)
+        plt.xlim(-1,2)
         plt.title(f'{target} Full Field')
         plt.xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
         plt.ylabel(f'{red_filter}$_0$')
@@ -645,7 +748,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             plt.figure(figsize=(4,8))
             plt.scatter(dolphot_cat[f'{blue_filter}_0']-dolphot_cat[f'{red_filter}_0'], dolphot_cat[f'{red_filter}_0'],c='k',s=3,marker='o')
             plt.ylim(27.5,20)
-            plt.xlim(-0.5,1.5)
+            plt.xlim(-1,2)
             plt.title(f'{target} (Initial)')
             plt.xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
             plt.ylabel(f'{red_filter}$_0$')
@@ -673,80 +776,11 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         fake_stars.to_csv(ast_outfile,index=False)
 
 
-        # Calculate completeness limits
-        m_min = 21.
-        m_max = 30.
-        m_wid = 0.1
-
-        m_bins = numpy.arange(m_min,m_max+0.1*m_wid,m_wid)
-
-        colmax = 2.0
-        colmin = -1.0
-        colwid = 0.2
-        colbins = numpy.arange(colmin,colmax+0.1*colwid,colwid)
-
-        C90 = numpy.zeros(len(colbins)-1)
-        C50 = numpy.zeros(len(colbins)-1)
-
-        global_logger.info(f'Fitting completeness limits for {target}.')
-        fake_stars['color_in'] = fake_stars[f'{blue_filter}_in']-fake_stars[f'{red_filter}_in']
-        for c in range(len(colbins)-1):
-            condition = ((fake_stars['color_in'] < colbins[c+1]) & (fake_stars['color_in'] > colbins[c]))
-            fake_stars_colbin = fake_stars[condition]
-
-            comp = numpy.zeros(len(m_bins)-1)
-            cnts = numpy.zeros(len(m_bins)-1)
-
-            for i in fake_stars_colbin.index:
-                j = int(max(min(len(m_bins)-2,numpy.floor((fake_stars_colbin[f'{red_filter}_in'][i]-m_min)/m_wid)),0))
-                if fake_stars_colbin['recovered'][i] > 0:
-                    comp[j] += 1.
-                cnts[j] += 1.
-
-            comp = comp/cnts
-
-            inx = numpy.where(comp > 0.4)[0]
-            
-            try:
-                erf_fit = scipy.optimize.curve_fit(comp_func,m_bins[inx]+0.05,comp[inx],p0=[26.5,0.5],
-                                                   sigma=1./numpy.sqrt(cnts[inx]),bounds=[[24.,0.1],[28.,3.]])
-
-                comp90 = inv_comp_func(0.9,erf_fit[0][0],erf_fit[0][1])
-
-                comp50 = erf_fit[0][0]
-
-                C90[c] = comp90
-                C50[c] = comp50
-            except ValueError:
-                C90[c] = numpy.nan
-                C50[c] = numpy.nan
-
-        try:        
-            fit90 = scipy.optimize.curve_fit(col_comp_func,colbins[:-1]+0.5*colwid,C90,p0=[0.8,26.5,0.])
-            global_logger.info(f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
-
-            # 50% completeness varies nearly linearly with colour over this range, so a
-            # simple linear model is used rather than the piecewise model applied to 90%.
-            fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b,colbins[:-1]+0.5*colwid,C50,p0=[1,30])
-            global_logger.info(f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
-
-            with open(os.path.join(eff_out_dir,target,'completeness.dat'), 'w') as f:
-                f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
-                f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
-
-            x_tmp = numpy.arange(-1.,2.0,0.01)
-            plt.plot(x_tmp,col_comp_func(x_tmp,fit90[0][0],fit90[0][1],fit90[0][2]))
-            plt.plot(x_tmp,fit50[0][0]*x_tmp + fit50[0][1])
-        except (ValueError, RuntimeError):
-            global_logger.warning(f'Completeness limit fit failed for {target}.')
-        
-        plt.scatter(colbins[:-1]+0.5*colwid,C90)
-        plt.scatter(colbins[:-1]+0.5*colwid,C50)
-        plt.ylim(29,24)
-        plt.ylabel(red_filter)
-        plt.xlabel(f'{blue_filter}-{red_filter}')
-        plt.savefig(os.path.join(eff_out_dir,target,'completeness.pdf'),bbox_inches='tight')
-        plt.close()
+        # Calculate completeness limits: standard, then a stricter variant
+        # requiring SNR >= 4 in both filters for a star to count as recovered.
+        _fit_completeness(fake_stars, blue_filter, red_filter, eff_out_dir, target)
+        _fit_completeness(fake_stars, blue_filter, red_filter, eff_out_dir, target,
+                          suffix='_4sig', min_snr=4)
 
     elif not os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")):
         global_logger.info(f'Photometry for {target} incomplete. Skipping.')
@@ -775,69 +809,12 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         global_logger.info(f'Full AST catalog for {target}: {len(fake_stars_full)} stars.')
         fake_stars_full.to_csv(ast_full_path, index=False)
 
-        # Re-fit completeness curves on the full catalog, overwriting completeness.dat/pdf
-        m_min = 21.
-        m_max = 30.
-        m_wid = 0.1
-        m_bins = numpy.arange(m_min, m_max+0.1*m_wid, m_wid)
-        colmax = 2.0
-        colmin = -1.0
-        colwid = 0.2
-        colbins = numpy.arange(colmin, colmax+0.1*colwid, colwid)
-        C90 = numpy.zeros(len(colbins)-1)
-        C50 = numpy.zeros(len(colbins)-1)
-
-        global_logger.info(f'Fitting completeness limits for {target} (full AST catalog).')
-        fake_stars_full['color_in'] = fake_stars_full[f'{blue_filter}_in'] - fake_stars_full[f'{red_filter}_in']
-        for c in range(len(colbins)-1):
-            condition = ((fake_stars_full['color_in'] < colbins[c+1]) &
-                         (fake_stars_full['color_in'] > colbins[c]))
-            fake_stars_colbin = fake_stars_full[condition]
-            comp = numpy.zeros(len(m_bins)-1)
-            cnts  = numpy.zeros(len(m_bins)-1)
-            for i in fake_stars_colbin.index:
-                j = int(max(min(len(m_bins)-2,
-                               numpy.floor((fake_stars_colbin[f'{red_filter}_in'][i]-m_min)/m_wid)), 0))
-                if fake_stars_colbin['recovered'][i] > 0:
-                    comp[j] += 1.
-                cnts[j] += 1.
-            comp = comp/cnts
-            inx = numpy.where(comp > 0.4)[0]
-            try:
-                erf_fit = scipy.optimize.curve_fit(
-                    comp_func, m_bins[inx]+0.05, comp[inx], p0=[26.5,0.5],
-                    sigma=1./numpy.sqrt(cnts[inx]), bounds=[[24.,0.1],[28.,3.]])
-                C90[c] = inv_comp_func(0.9, erf_fit[0][0], erf_fit[0][1])
-                C50[c] = erf_fit[0][0]
-            except ValueError:
-                C90[c] = numpy.nan
-                C50[c] = numpy.nan
-
-        try:
-            fit90 = scipy.optimize.curve_fit(
-                col_comp_func, colbins[:-1]+0.5*colwid, C90, p0=[0.8,26.5,0.])
-            global_logger.info(
-                f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
-            fit50 = scipy.optimize.curve_fit(
-                lambda x,a,b: a*x + b, colbins[:-1]+0.5*colwid, C50, p0=[1,30])
-            global_logger.info(
-                f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
-            with open(os.path.join(eff_out_dir, target, 'completeness.dat'), 'w') as f:
-                f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
-                f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
-            x_tmp = numpy.arange(-1., 2.0, 0.01)
-            plt.plot(x_tmp, col_comp_func(x_tmp, fit90[0][0], fit90[0][1], fit90[0][2]))
-            plt.plot(x_tmp, fit50[0][0]*x_tmp + fit50[0][1])
-        except (ValueError, RuntimeError):
-            global_logger.warning(
-                f'Completeness limit fit failed for {target} (full AST catalog).')
-        plt.scatter(colbins[:-1]+0.5*colwid, C90)
-        plt.scatter(colbins[:-1]+0.5*colwid, C50)
-        plt.ylim(29, 24)
-        plt.ylabel(red_filter)
-        plt.xlabel(f'{blue_filter}-{red_filter}')
-        plt.savefig(os.path.join(eff_out_dir, target, 'completeness.pdf'), bbox_inches='tight')
-        plt.close()
+        # Re-fit completeness curves on the full catalog, overwriting
+        # completeness{,_4sig}.dat/pdf
+        _fit_completeness(fake_stars_full, blue_filter, red_filter, eff_out_dir, target,
+                          log_suffix=' (full AST catalog)')
+        _fit_completeness(fake_stars_full, blue_filter, red_filter, eff_out_dir, target,
+                          suffix='_4sig', min_snr=4, log_suffix=' (full AST catalog)')
 
 
 
