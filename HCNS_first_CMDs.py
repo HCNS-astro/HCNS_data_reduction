@@ -427,7 +427,8 @@ def _read_fake_catalog(fake_path, catalog_path):
     return df, filters_found
 
 
-def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suffix='', min_snr=None, log_suffix=''):
+def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suffix='', min_snr=None, log_suffix='',
+                      plateau50=False):
     """Fit color-dependent completeness curves from an AST catalog and save
     ``completeness{suffix}.dat``/``completeness{suffix}.pdf``.
 
@@ -453,6 +454,11 @@ def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suff
     log_suffix : str, optional
         Appended to log messages (e.g. ``' (full AST catalog)'``).
         Default ``''``.
+    plateau50 : bool, optional
+        If ``True``, fit the 50% completeness limit with the same
+        plateau-plus-parabola model (``col_comp_func``) used for 90%, and
+        write three ``comp50`` parameters instead of two. Default ``False``
+        (straight-line fit).
     """
     m_min = 21.
     m_max = 30.
@@ -506,18 +512,25 @@ def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suff
         fit90 = scipy.optimize.curve_fit(col_comp_func, colbins[:-1]+0.5*colwid, C90, p0=[0.8,26.5,0.])
         global_logger.info(f"90% Completeness parameters: [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]")
 
-        # 50% completeness varies nearly linearly with colour over this range, so a
-        # simple linear model is used rather than the piecewise model applied to 90%.
-        fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b, colbins[:-1]+0.5*colwid, C50, p0=[1,30])
-        global_logger.info(f"50% Completeness parameters: [{fit50[0][0]}, {fit50[0][1]}]")
+        if plateau50:
+            fit50 = scipy.optimize.curve_fit(col_comp_func, colbins[:-1]+0.5*colwid, C50, p0=[0.8,27.,0.])
+        else:
+            # 50% completeness varies nearly linearly with colour over this range, so a
+            # simple linear model is used rather than the piecewise model applied to 90%.
+            fit50 = scipy.optimize.curve_fit(lambda x,a,b: a*x + b, colbins[:-1]+0.5*colwid, C50, p0=[1,30])
+        comp50_str = ', '.join(str(p) for p in fit50[0])
+        global_logger.info(f"50% Completeness parameters: [{comp50_str}]")
 
         with open(os.path.join(out_dir, target, f'completeness{suffix}.dat'), 'w') as f:
-            f.write(f'comp50 = [{fit50[0][0]}, {fit50[0][1]}]\n')
+            f.write(f'comp50 = [{comp50_str}]\n')
             f.write(f'comp90 = [{fit90[0][0]}, {fit90[0][1]}, {fit90[0][2]}]')
 
         x_tmp = numpy.arange(colmin, colmax, 0.01)
         plt.plot(x_tmp, col_comp_func(x_tmp, fit90[0][0], fit90[0][1], fit90[0][2]))
-        plt.plot(x_tmp, fit50[0][0]*x_tmp + fit50[0][1])
+        if plateau50:
+            plt.plot(x_tmp, col_comp_func(x_tmp, *fit50[0]))
+        else:
+            plt.plot(x_tmp, fit50[0][0]*x_tmp + fit50[0][1])
     except (ValueError, RuntimeError):
         global_logger.warning(f'Completeness limit fit failed for {target}{log_suffix}.')
 
@@ -790,10 +803,11 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
 
 
         # Calculate completeness limits: standard, then a stricter variant
-        # requiring SNR >= 4 in both filters for a star to count as recovered.
+        # requiring SNR >= 4 in both filters for a star to count as recovered
+        # (which also fits 50% with the plateau-plus-parabola model).
         _fit_completeness(fake_stars, blue_filter, red_filter, eff_out_dir, target)
         _fit_completeness(fake_stars, blue_filter, red_filter, eff_out_dir, target,
-                          suffix='_4sig', min_snr=4)
+                          suffix='_4sig', min_snr=4, plateau50=True)
 
     elif not os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")):
         global_logger.info(f'Photometry for {target} incomplete. Skipping.')
@@ -827,7 +841,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         _fit_completeness(fake_stars_full, blue_filter, red_filter, eff_out_dir, target,
                           log_suffix=' (full AST catalog)')
         _fit_completeness(fake_stars_full, blue_filter, red_filter, eff_out_dir, target,
-                          suffix='_4sig', min_snr=4, log_suffix=' (full AST catalog)')
+                          suffix='_4sig', min_snr=4, log_suffix=' (full AST catalog)', plateau50=True)
 
 
 
