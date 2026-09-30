@@ -371,7 +371,7 @@ def _read_dolphot_catalog(catalog_path):
     return df, filters_found
 
 
-def _read_fake_catalog(fake_path, catalog_path):
+def _read_fake_catalog(fake_path, catalog_path, blue_filter, red_filter):
     """Read a dolphot artificial-star (``.fake``) catalog, auto-detecting
     column names from the companion ``<catalog_path>.columns`` file (the
     *normal* photometry catalog's columns file -- per the dolphot manual,
@@ -386,13 +386,16 @@ def _read_fake_catalog(fake_path, catalog_path):
     catalog_path : str
         Path to the corresponding normal photometry output file (no
         extension) -- used only to locate ``<catalog_path>.columns``.
+    blue_filter, red_filter : str
+        Filters to include in the output, e.g. ``'F606W'``, ``'F814W'``.
 
     Returns
     -------
     pandas.DataFrame
-        Columns ``'x'``, ``'y'`` (true position), ``'{filt}_in'`` (true
-        injected magnitude) and ``'{filt}_mag'``/``'SNR_{filt}'`` (recovered
-        photometry) per filter, ``'SNR'`` (global), and ``'recovered'`` (1 if
+        Exactly the columns ``'x'``, ``'y'`` (true position),
+        ``'{blue}_in'``, ``'{red}_in'`` (true injected magnitude),
+        ``'{blue}_out'``, ``'{red}_out'`` (recovered VEGAMAG), ``'SNR'``
+        (global), ``'SNR_{blue}'``, ``'SNR_{red}'``, and ``'recovered'`` (1 if
         the star passed the same quality cuts as the main catalog, else 0).
     list of str
         Filters found, in the order dolphot reported them.
@@ -423,7 +426,12 @@ def _read_fake_catalog(fake_path, catalog_path):
     condition &= (sum(df[f'sharp_{filt}'] for filt in filters_found)**2. < max_sharp)
     df['recovered'] = numpy.where(condition, 1, 0)
     df['SNR'] = df['SNR_global']
+    for filt in (blue_filter, red_filter):
+        df[f'{filt}_out'] = df[f'{filt}_mag']
 
+    df = df[['x', 'y', f'{blue_filter}_in', f'{red_filter}_in',
+             f'{blue_filter}_out', f'{red_filter}_out',
+             'SNR', f'SNR_{blue_filter}', f'SNR_{red_filter}', 'recovered']]
     return df, filters_found
 
 
@@ -792,7 +800,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping AST.')
             continue
 
-        fake_stars, _ = _read_fake_catalog(ast_file, dolphot_outfile)
+        fake_stars, _ = _read_fake_catalog(ast_file, dolphot_outfile, blue_filter, red_filter)
 
         global_logger.info(f'Fake star catalog length for {target}: {len(fake_stars)}')
         global_logger.info(f'Recovery fraction: {numpy.sum(fake_stars["recovered"])/len(fake_stars)}')
@@ -830,7 +838,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
             f'{len(extra_fake_files)} extra AST file(s) found for {target}. Building full catalog.')
         dfs = [pandas.read_csv(os.path.join(eff_out_dir, target, 'phot_ast.csv'))]
         for ef in extra_fake_files:
-            extra_df, _ = _read_fake_catalog(ef, dolphot_outfile)
+            extra_df, _ = _read_fake_catalog(ef, dolphot_outfile, blue_filter, red_filter)
             dfs.append(extra_df)
         fake_stars_full = pandas.concat(dfs, ignore_index=True)
         global_logger.info(f'Full AST catalog for {target}: {len(fake_stars_full)} stars.')
