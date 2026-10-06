@@ -552,7 +552,7 @@ def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suff
 
 
 # HCNS targets -- exclude the 'archival' subdirectory
-all_targets = [(data_dir, reduct_dir, out_dir, os.path.basename(p))
+all_targets = [(data_dir, reduct_dir, out_dir, os.path.basename(p), 'HCNS')
                for p in glob.glob(os.path.join(data_dir, '*'))
                if os.path.isdir(p) and os.path.basename(p) != 'archival']
 
@@ -570,21 +570,20 @@ if os.path.isdir(archival_reduct_base):
                     prog_dir,
                     os.path.join(archival_out_base, prog_id),
                     os.path.basename(target_path),
+                    f'archival {prog_id}',
                 ))
 
-for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
-    os.makedirs(os.path.join(eff_out_dir, target), exist_ok=True)
+# A target observed by both HCNS and an archival program (or by several
+# archival programs) gets one independent entry per data set.
+_locations = {}
+for *_, _target, _label in all_targets:
+    _locations.setdefault(_target, []).append(_label)
+for _target, _labels in sorted(_locations.items()):
+    if len(_labels) > 1:
+        global_logger.info(f'{_target} found in: {", ".join(_labels)}')
+
+for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
     target_dir = os.path.join(eff_data_dir, target)
-    phot_pars_file = os.path.join(eff_reduct_dir, target, 'phot_pars')
-    ref_rootname = None
-    if os.path.isfile(phot_pars_file):
-        with open(phot_pars_file) as f:
-            for line in f:
-                if line.startswith('img0_file='):
-                    val = line.strip().split('=', 1)[1].strip()
-                    ref_rootname = val.rsplit('.chip', 1)[0]
-    else:
-        global_logger.warning(f'phot_pars not found for {target}. Falling back to filterdrizimg[1] as WCS reference.')
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     instrument = None
     for imgpath in drizfilelist:
@@ -595,11 +594,24 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target in all_targets:
         elif 'WFC3' in header['INSTRUME']:
             instrument = 'WFC3'
         else:
-            global_logger.warning(f'Instrument not set for {target}. Skipping CMD creation.')
+            global_logger.warning(f'Instrument not set for {target} ({label}). Skipping CMD creation.')
             continue
     if instrument is None:
-        global_logger.warning(f'No DRC files found for {target}. Skipping.')
+        global_logger.warning(f'No DRC files in {target_dir}; skipping {target} ({label}).')
         continue
+
+    os.makedirs(os.path.join(eff_out_dir, target), exist_ok=True)
+    phot_pars_file = os.path.join(eff_reduct_dir, target, 'phot_pars')
+    ref_rootname = None
+    if os.path.isfile(phot_pars_file):
+        with open(phot_pars_file) as f:
+            for line in f:
+                if line.startswith('img0_file='):
+                    val = line.strip().split('=', 1)[1].strip()
+                    ref_rootname = val.rsplit('.chip', 1)[0]
+    else:
+        global_logger.warning(f'{phot_pars_file} not found for {target} ({label}). '
+                              f'Falling back to filterdrizimg[1] as WCS reference.')
     dolphot_outfile = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}')
     _fake_std = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}.fake')
     _fake_00  = os.path.join(eff_reduct_dir, target, f'{target}_{instrument.lower()}_00.fake')

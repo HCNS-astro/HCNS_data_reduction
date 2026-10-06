@@ -115,7 +115,6 @@ def _download_target(target, target_dir, target_obs, exclude=()):
     a different (e.g. HAP-association) observation record whose dataURL
     doesn't literally name the exposure.
     """
-    os.makedirs(target_dir, exist_ok=True)
     for obsid in set(target_obs['obsid']):
         product_list = Observations.get_unique_product_list(str(obsid))
         for subgroup in ('DRC', 'FLC', 'FLT'):
@@ -135,6 +134,9 @@ def _download_target(target, target_dir, target_obs, exclude=()):
             if len(products) == 0:
                 continue
             logging.info(f'Downloading {", ".join(list(products["productFilename"]))}')
+            # Created only once there is something to download, so a target
+            # whose products were all excluded doesn't leave an empty dir.
+            os.makedirs(target_dir, exist_ok=True)
             Observations.download_products(products, download_dir=target_dir, flat=True)
 
 
