@@ -233,7 +233,8 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
         if verbose:
             global_logger.info(f'{dolphot_dir} already exists.')
     else:
-        os.mkdir(dolphot_dir)
+        # makedirs so ../reduction itself is created on a first run
+        os.makedirs(dolphot_dir, exist_ok=True)
         global_logger.info(f'{dolphot_dir} created.')
 
     #Create log for dolphot run for this target
