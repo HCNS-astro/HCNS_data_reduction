@@ -1,5 +1,5 @@
 import os, sys, glob, numpy, argparse
-import shutil, subprocess, logging
+import shutil, subprocess, logging, warnings
 from astropy.io import fits
 from joblib import Parallel, delayed
 
@@ -133,6 +133,78 @@ def execute_command(command, exec_dir, logger):
         process.wait()
     return process.returncode
 
+
+# ---------------------------------------------------------------------------
+# Helpers that keep the reduction safe to stop and restart at any point: files
+# only ever appear under their final name once complete.
+# ---------------------------------------------------------------------------
+
+def _copy_atomic(src, dst):
+    """Copy ``src`` to ``dst`` via a temporary file, so an interrupted copy never
+    leaves a partial file under the final name."""
+    tmp = dst + '.part'
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
+
+
+def _write_atomic(path, text):
+    """Write ``text`` to ``path`` via a temporary file (see ``_copy_atomic``)."""
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def _fits_problem(path):
+    """Return ``None`` if a FITS file reads completely (and its checksums match,
+    for files that carry CHECKSUM/DATASUM keywords), else a short description.
+    Catches files truncated by an interrupted download or copy."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        try:
+            with fits.open(path, checksum=True) as hdul:
+                for hdu in hdul:
+                    hdu.data
+        except Exception as e:
+            return f'{type(e).__name__}: {e}'
+    msgs = [str(w.message) for w in caught
+            if any(k in str(w.message).lower() for k in ('truncated', 'checksum', 'datasum'))]
+    return '; '.join(msgs) or None
+
+
+def _clear_partial_prep(dolphot_dir):
+    """Delete the products of an unfinished prep (copied images, split chips, sky
+    images, phot_pars, temporary files and step markers) so prep can start again
+    from fresh copies. Logs and any other files are kept. Returns the number of
+    files removed."""
+    patterns = ['*_flt.fits', '*_flc.fits', '*_drc.fits', '*.chip[0-9].fits', '*.chip[0-9].sky.fits',
+                '*.part', '*.tmp', 'phot_pars',
+                'acsmask.done', 'wfc3mask.done', 'splitgroups.done', 'calcsky.done']
+    removed = 0
+    for pattern in patterns:
+        for path in glob.glob(os.path.join(dolphot_dir, pattern)):
+            os.remove(path)
+            removed += 1
+    return removed
+
+
+def _set_alignment(dolphot_dir, ref_rootname, align_level):
+    """Set the reference image and the Align block (always the last lines) of
+    phot_pars for one alignment attempt."""
+    path = os.path.join(dolphot_dir, 'phot_pars')
+    with open(path) as f:
+        lines = f.readlines()
+    out = []
+    for line in lines:
+        if 'Align = ' in line:
+            break
+        if line.startswith('img0_file'):
+            out.append(f"img0_file={ref_rootname}.chip1\n")
+        else:
+            out.append(line)
+    out.append(f"Align = {align_level}\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
+    _write_atomic(path, ''.join(out))
+
 def align_dolphot(target, reduct_dir, logger, instrument=None):
     """Run dolphot in alignment-only mode and validate the result.
 
@@ -193,10 +265,17 @@ def align_dolphot(target, reduct_dir, logger, instrument=None):
 def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=False, template_file=None):
     """Prepare all files and run the pre-photometry steps for dolphot.
 
-    Steps performed (each guarded by a marker file so they are skipped on
-    re-runs): copy raw FITS files to the reduction directory, write
-    ``phot_pars``, mask detector edges, split multi-chip frames, calculate
-    sky backgrounds, and run alignment with up to three retry attempts.
+    Steps performed: check the downloaded FITS files are complete, copy them
+    to the reduction directory, write ``phot_pars``, mask detector edges, split
+    multi-chip frames, calculate sky backgrounds (together "prep", marked
+    complete by ``prep.done``), then run alignment with up to three retry
+    attempts (``align.done`` / ``align.failed``).
+
+    Safe to stop and restart at any point: files are only written under their
+    final names once complete, an unfinished prep is cleared and started again
+    from fresh copies, and alignment always restarts from the first attempt.
+    Reduction directories prepared by earlier versions of this function (with
+    per-step markers) are recognised as complete.
 
     Parameters
     ----------
@@ -275,31 +354,43 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
     selected_filters = {RED_FILTER, blue_filter}
     global_logger.info(f'{target}: selected filters for dolphot: {sorted(selected_filters)}.')
 
-    #Copy files to dolphot dir (only the two selected filters)
-    expfilelist = []
-    drizfilelist = []
-    for imgpath in raw_expfilelist:
-        if _header_filter(imgpath, instrument) not in selected_filters:
-            continue
-        imgfile = os.path.split(imgpath)[1]
-        copypath = os.path.join(dolphot_dir,imgfile)
-        if not os.path.isfile(copypath):
-            global_logger.info(f'Copying {imgfile} to {copypath}')
-            shutil.copyfile(imgpath,copypath)
-        elif verbose:
-            global_logger.info(f'{copypath} already exists.')
-        expfilelist.append(copypath)
-    for imgpath in raw_drizfilelist:
-        if _header_filter(imgpath, instrument) not in selected_filters:
-            continue
-        imgfile = os.path.split(imgpath)[1]
-        copypath = os.path.join(dolphot_dir,imgfile)
-        if not os.path.isfile(copypath):
-            global_logger.info(f'Copying {imgfile} to {copypath}')
-            shutil.copyfile(imgpath,copypath)
-        elif verbose:
-            global_logger.info(f'{copypath} already exists.')
-        drizfilelist.append(copypath)
+    # Prep (copying, phot_pars, masking, splitgroups, calcsky) is one unit, marked
+    # complete by prep.done. Its steps work in place on the copied images, so if it
+    # was interrupted its partial products are removed and it starts again from
+    # fresh copies; otherwise a half-copied or half-masked image could be reused.
+    prep_done_path = os.path.join(dolphot_dir, 'prep.done')
+    old_step_markers = [f"{instrument.lower()}mask.done", "splitgroups.done", "calcsky.done"]
+    if not os.path.isfile(prep_done_path):
+        if (all(os.path.isfile(os.path.join(dolphot_dir, m)) for m in old_step_markers)
+                and os.path.isfile(os.path.join(dolphot_dir, 'phot_pars'))):
+            # Prepared by an earlier version of this script, which marked each step separately.
+            subprocess.run(["touch", "prep.done"], cwd=dolphot_dir)
+        else:
+            n_removed = _clear_partial_prep(dolphot_dir)
+            if n_removed:
+                global_logger.warning(f'{target}: an earlier prep did not finish; removed {n_removed} partial '
+                                      f'file(s) and starting prep again.')
+    prep_needed = not os.path.isfile(prep_done_path)
+
+    # Images of the two selected filters, and their copies in the dolphot dir
+    selected_exp = [p for p in raw_expfilelist if _header_filter(p, instrument) in selected_filters]
+    selected_drz = [p for p in raw_drizfilelist if _header_filter(p, instrument) in selected_filters]
+    expfilelist = [os.path.join(dolphot_dir, os.path.basename(p)) for p in selected_exp]
+    drizfilelist = [os.path.join(dolphot_dir, os.path.basename(p)) for p in selected_drz]
+
+    if prep_needed:
+        # Make sure the downloaded files are complete before using them.
+        bad = [(p, problem) for p in selected_exp + selected_drz if (problem := _fits_problem(p))]
+        if bad:
+            for p, problem in bad:
+                global_logger.error(f'{target}: {p} is incomplete or corrupt ({problem}); re-download it.')
+            global_logger.error(f'{target}: skipping dolphot prep until the data are fixed.')
+            close_logger(dolphot_logger)
+            return None
+        #Copy files to dolphot dir
+        for src, dst in zip(selected_exp + selected_drz, expfilelist + drizfilelist):
+            global_logger.info(f'Copying {os.path.basename(src)} to {dst}')
+            _copy_atomic(src, dst)
 
     #Extract info from files headers
     filters = []
@@ -374,127 +465,78 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
                         filterexposures[i].append(rootname)
                         filterexptimes[i].append(header['EXPTIME'])
 
-    #Make photometry parameters file
-    if not os.path.isfile(os.path.join(dolphot_dir, "phot_pars")):
-        photpars = open(os.path.join(dolphot_dir,'phot_pars'),'w')
-        photpars.write(f"Nimg={2*len(numpy.array(filterexposures).flatten())}\n")
-        filterwavelengths = []
-        for i,filtername in enumerate(filters):
-            # Extract central wavelength in nm from the filter name, e.g. "F814W" -> 814
-            filterwavelengths.append(int(filtername[1:4]))
-        inx = filterwavelengths.index(max(filterwavelengths))
-        photpars.write(f"img0_file={filterdrizimg[inx]}.chip1\n")
+    # Central wavelength in nm from the filter name, e.g. "F814W" -> 814. The
+    # longest-wavelength DRC is the reference image; the last alignment attempt
+    # switches to the shortest-wavelength one.
+    filterwavelengths = [int(filtername[1:4]) for filtername in filters]
+    ref_longest = filterdrizimg[filterwavelengths.index(max(filterwavelengths))]
+    ref_shortest = filterdrizimg[filterwavelengths.index(min(filterwavelengths))]
+
+    if prep_needed:
+        #Make photometry parameters file
+        exposures = [filename for exps in filterexposures for filename in exps]
+        text = [f"Nimg={2*len(exposures)}\n", f"img0_file={ref_longest}.chip1\n"]
         # Each FLC/FLT exposure occupies two consecutive image slots (chip1 and chip2),
         # so exposure i maps to img{2i+1} (chip1) and img{2i+2} (chip2).
-        for i,filename in enumerate(numpy.array(filterexposures).flatten()):
-            photpars.write("img{0}_file={1}.chip1\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+1,filename))
-            photpars.write("img{0}_file={1}.chip2\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+2,filename))
-
-        template_file = f'phot_pars_{instrument.upper()}_template'
-        temp_photpars = open(template_file)
-
-        lines = temp_photpars.readlines()
-        temp_photpars.close()
-        for line in lines:
-            photpars.write(line)
-        photpars.write('\n')
-
-        if CTE:
-            photpars.write(f"{instrument.upper()}useCTE = 1\n")
-        else:
-            photpars.write(f"{instrument.upper()}useCTE = 0\n")
-        photpars.write(f"AlignIter={align_iter}\n")
-        photpars.write("Align = 2\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
-        photpars.close() 
+        for i, filename in enumerate(exposures):
+            text.append("img{0}_file={1}.chip1\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+1, filename))
+            text.append("img{0}_file={1}.chip2\nimg{0}_shift= 0 0\nimg{0}_xform= 1 0 0\n".format(2*i+2, filename))
+        with open(f'phot_pars_{instrument.upper()}_template') as f:
+            text.append(f.read())
+        text.append('\n')
+        text.append(f"{instrument.upper()}useCTE = {1 if CTE else 0}\n")
+        text.append(f"AlignIter={align_iter}\n")
+        text.append("Align = 2\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
+        _write_atomic(os.path.join(dolphot_dir, 'phot_pars'), ''.join(text))
         global_logger.info(f'Created photpars file for {target}.')
 
-    #Run masking
-    if not os.path.isfile(os.path.join(dolphot_dir, f"{instrument.lower()}mask.done")):
-        dolphot_logger.info(f'Running masking for {target}.')
-        for i,filtername in enumerate(filters):
-            command = [f"{instrument.lower()}mask", f"-exptime={numpy.sum(filterexptimes[i])}", f"-ncombine={len(filterexptimes[i])}", f"{filterdrizimg[i]}.fits"]
-            execute_command(command, dolphot_dir, dolphot_logger)
-
-            for j,filename in enumerate(filterexposures[i]):
-                command = [f"{instrument.lower()}mask", f"{filename}.fits"]
-                execute_command(command, dolphot_dir, dolphot_logger)
-        subprocess.run(["touch", f"{instrument.lower()}mask.done"], cwd=dolphot_dir)
-
-    #Run split groups
-    if not os.path.isfile(os.path.join(dolphot_dir, "splitgroups.done")):
-        dolphot_logger.info(f'Running splitgroups for {target}.')
-        for i,filtername in enumerate(filters):
-            command = ["splitgroups", f"{filterdrizimg[i]}.fits"]
-            execute_command(command, dolphot_dir, dolphot_logger)
-
-            for j,filename in enumerate(filterexposures[i]):
-                command = ["splitgroups", f"{filename}.fits"]
-                execute_command(command, dolphot_dir, dolphot_logger)
-        subprocess.run(["touch", "splitgroups.done"], cwd=dolphot_dir)
-
-    #Run calc sky
-    if not os.path.isfile(os.path.join(dolphot_dir, "calcsky.done")):
-        dolphot_logger.info(f'Running calcsky for {target}.')
-        for i,filtername in enumerate(filters):
-            command = ["calcsky", f"{filterdrizimg[i]}.chip1", "15", "35", "-128", "2.25", "2.00"]
-            execute_command(command, dolphot_dir, dolphot_logger)
-            for j,filename in enumerate(filterexposures[i]):
+        #Run masking, split groups and calc sky. A failed command stops prep
+        #without writing prep.done, so the next run starts it again.
+        commands = []
+        for i, filtername in enumerate(filters):
+            commands.append(('masking', [f"{instrument.lower()}mask", f"-exptime={numpy.sum(filterexptimes[i])}",
+                                         f"-ncombine={len(filterexptimes[i])}", f"{filterdrizimg[i]}.fits"]))
+            commands += [('masking', [f"{instrument.lower()}mask", f"{filename}.fits"]) for filename in filterexposures[i]]
+        for i, filtername in enumerate(filters):
+            commands.append(('splitgroups', ["splitgroups", f"{filterdrizimg[i]}.fits"]))
+            commands += [('splitgroups', ["splitgroups", f"{filename}.fits"]) for filename in filterexposures[i]]
+        for i, filtername in enumerate(filters):
+            commands.append(('calcsky', ["calcsky", f"{filterdrizimg[i]}.chip1", "15", "35", "-128", "2.25", "2.00"]))
+            for filename in filterexposures[i]:
                 for chip in range(1,3):
-                    command = ["calcsky", f"{filename}.chip{chip}", "15", "35", "-128", "2.25", "2.00"]
-                    execute_command(command, dolphot_dir, dolphot_logger)
-        subprocess.run(["touch", "calcsky.done"], cwd=dolphot_dir)
+                    commands.append(('calcsky', ["calcsky", f"{filename}.chip{chip}", "15", "35", "-128", "2.25", "2.00"]))
+        stage = None
+        for step, command in commands:
+            if step != stage:
+                dolphot_logger.info(f'Running {step} for {target}.')
+                stage = step
+            rc = execute_command(command, dolphot_dir, dolphot_logger)
+            if rc != 0:
+                global_logger.error(f'{target}: {" ".join(command)} failed (return code {rc}); '
+                                    f'prep will start again on the next run.')
+                close_logger(dolphot_logger)
+                return None
+        subprocess.run(["touch", "prep.done"], cwd=dolphot_dir)
+        global_logger.info(f'Prep completed for {target}.')
 
     #Run alignment
+    align_success = os.path.isfile(os.path.join(dolphot_dir, "align.done"))
     if (not os.path.isfile(os.path.join(dolphot_dir, "align.done"))) and (not os.path.isfile(os.path.join(dolphot_dir, "align.failed"))):
         dolphot_logger.info(f'Running alignment for {target}.')
-        align_success = False
-        align_attempt = 0
-        while not align_success:
+        # Escalation: Align = 2, 3 and 4 with the longest-wavelength reference, then
+        # Align = 2 with the shortest-wavelength reference. phot_pars is set for
+        # every attempt, including the first, so a restarted alignment doesn't carry
+        # on from an interrupted run's settings.
+        attempts = [(2, ref_longest), (3, ref_longest), (4, ref_longest), (2, ref_shortest)]
+        for attempt, (align_level, ref_rootname) in enumerate(attempts, start=1):
+            _set_alignment(dolphot_dir, ref_rootname, align_level)
+            if attempt > 1:
+                dolphot_logger.info(f'Re-running alignment (attempt {attempt}: Align = {align_level}, '
+                                    f'reference {ref_rootname}).')
             align_success = align_dolphot(target, reduct_dir, dolphot_logger, instrument=instrument)
-            align_attempt += 1
-            if not align_success:
-                dolphot_logger.info(f'Alignment attempt {align_attempt} failed.')
-                # Escalation strategy: attempt 1 → Align=3, attempt 2 → Align=4.
-                # On attempt 3, also switch the reference image to the longest-wavelength
-                # filter, which typically has better S/N for red stars near the RGB tip.
-                if align_attempt < 3:
-                    dolphot_logger.info('Re-running alignment.')
-                    temp_photpars = open(os.path.join(dolphot_dir,'phot_pars'))
-                    lines = temp_photpars.readlines()
-                    temp_photpars.close()
-                    photpars = open(os.path.join(dolphot_dir,'phot_pars'), 'w')
-                    for line in lines:
-                        if 'Align = ' not in line:
-                            photpars.write(line)
-                        else:
-                            break
-                    match align_attempt:
-                        case 1:
-                            photpars.write("Align = 3\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
-                            photpars.close() 
-                        case 2:
-                            photpars.write("Align = 4\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
-                            photpars.close() 
-                    dolphot_logger.info('Updated alignment parameters in phot_pars.')
-                elif align_attempt == 3:
-                    dolphot_logger.info(f'Re-running alignment (final attempt).')
-                    temp_photpars = open(os.path.join(dolphot_dir,'phot_pars'))
-                    lines = temp_photpars.readlines()
-                    temp_photpars.close()
-                    photpars = open(os.path.join(dolphot_dir,'phot_pars'), 'w')
-                    for line in lines:
-                        if 'img0_file' in line:
-                            #Switch which image is used as reference
-                            inx = filterwavelengths.index(min(filterwavelengths))
-                            photpars.write(f"img0_file={filterdrizimg[inx]}.chip1\n")
-                        elif 'Align = ' not in line:
-                            photpars.write(line)
-                        else:
-                            break
-                    photpars.write("Align = 2\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
-                    photpars.close()
-                else:
-                    break
+            if align_success:
+                break
+            dolphot_logger.info(f'Alignment attempt {attempt} failed.')
 
         if align_success:
             subprocess.run(["touch", "align.done"], cwd=dolphot_dir)
@@ -578,8 +620,10 @@ def generate_fake_stars(target, reduct_dir, dolphot_logger, Nfake=200000,
         global_logger.info(f'Fake stars will be generated for filters: {filters[0]} and {filters[-1]}.')
         command = ['fakelist', f'{target}_{instrument.lower()}', f'{instrument.upper()}_{filters[0]}', f'{instrument.upper()}_{filters[-1]}',
                    f'{filt_min}', f'{filt_max}', f'{col_min}', f'{col_max}', f'-nstar={Nfake}']
-        with open(os.path.join(dolphot_dir,'fakelist.dat'), "w") as f:
+        fakelist_path = os.path.join(dolphot_dir, 'fakelist.dat')
+        with open(fakelist_path + '.tmp', "w") as f:
             subprocess.run(command, cwd=dolphot_dir, stdout=f)
+        os.replace(fakelist_path + '.tmp', fakelist_path)
     else:
         global_logger.error(f'There are not enough filters to generate fake stars.')
 
@@ -617,18 +661,12 @@ def run_dolphot(target, reduct_dir, fake_stars=False, verbose=False, iteration=N
     #Remove align only parameter
     with open(os.path.join(dolphot_dir,'phot_pars'), 'r') as file:
         lines = file.readlines()
-    with open(os.path.join(dolphot_dir,'phot_pars'), 'w') as file:
-        for line in lines:
-            if "AlignOnly" not in line:
-                file.write(line)
+    _write_atomic(os.path.join(dolphot_dir,'phot_pars'), ''.join(line for line in lines if "AlignOnly" not in line))
 
     if fake_stars:
         with open(os.path.join(dolphot_dir,'phot_pars'), 'r') as file:
-            lines = file.readlines()
-        with open(os.path.join(dolphot_dir,'phot_pars_fake'), 'w') as file:
-            for line in lines:
-                file.write(line)
-            file.write('FakeStars = fakelist.dat\nRandomFake=1')
+            phot_pars_text = file.read()
+        _write_atomic(os.path.join(dolphot_dir,'phot_pars_fake'), phot_pars_text + 'FakeStars = fakelist.dat\nRandomFake=1')
 
         generate_fake_stars(target, reduct_dir, dolphot_logger)
 
@@ -724,8 +762,8 @@ def _prep_dolphot(path, data_dir, reduct_dir):
     elif not os.path.isfile(os.path.join(reduct_dir, target, "align.done")):
         try:
             tmp = prep_dolphot(target, data_dir, reduct_dir, CTE=CTE)
-        except:
-            global_logger.warning(f'Dolphot prep failed for {target}.')
+        except Exception:
+            global_logger.exception(f'Dolphot prep failed for {target}.')
 
 
 def _run_dolphot_if_ready(path, reduct_dir, fake_stars=False):
