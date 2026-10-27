@@ -1,5 +1,5 @@
 import os, sys, glob, numpy, argparse
-import shutil, subprocess, logging, warnings
+import shutil, subprocess, logging, warnings, time
 from astropy.io import fits
 from joblib import Parallel, delayed
 
@@ -14,7 +14,20 @@ parser.add_argument('--ast', action='store_true',
                          'Requires the standard AST run to have completed first.')
 parser.add_argument('--ncpu', type=int, default=10,
                     help='Number of simultaneous dolphot processes (default: 10).')
+parser.add_argument('--flt', action='store_true',
+                    help="Use FLT exposures with dolphot's own CTE correction (useCTE = 1) instead of the "
+                         "default FLC exposures, which the STScI pipeline has already corrected for CTE "
+                         "(useCTE = 0). Note that dolphot has no CTE correction for WFC3.")
+parser.add_argument('--redo-flt', action='store_true',
+                    help='Re-reduce with FLC exposures the targets whose finished reduction used FLT '
+                         'exposures: their reduction directories, and the photometry outputs of '
+                         'HCNS_first_CMDs.py, are moved to ../reduction/flt_superseded/ and '
+                         '../output/flt_superseded/, and the targets are reduced again from the start.')
 args = parser.parse_args()
+if args.flt and args.redo_flt:
+    parser.error('--flt and --redo-flt cannot be used together.')
+if args.ast and args.redo_flt:
+    parser.error('--redo-flt cannot be combined with --ast; run it without --ast first.')
 
 if args.archival:
     data_dir   = os.path.abspath(os.path.join(code_dir, '..', 'data', 'archival'))
@@ -22,6 +35,9 @@ if args.archival:
 else:
     data_dir   = os.path.abspath(os.path.join(code_dir, '..', 'data'))
     reduct_dir = os.path.abspath(os.path.join(code_dir, '..', 'reduction'))
+# Top-level reduction and output directories, for setting aside superseded reductions.
+reduction_root = os.path.abspath(os.path.join(code_dir, '..', 'reduction'))
+output_root    = os.path.abspath(os.path.join(code_dir, '..', 'output'))
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +204,109 @@ def _clear_partial_prep(dolphot_dir):
     return removed
 
 
+def _reduction_image_type(dolphot_dir):
+    """``'FLT'`` or ``'FLC'``: the kind of exposure an existing reduction was
+    prepared with, from the ``useCTE`` line of its ``phot_pars`` (or, if prep
+    stopped before writing it, from the copied images); ``None`` if neither is there."""
+    pars = os.path.join(dolphot_dir, 'phot_pars')
+    if os.path.isfile(pars):
+        with open(pars) as f:
+            for line in f:
+                key, sep, value = line.partition('=')
+                if sep and key.strip().endswith('useCTE'):
+                    return 'FLT' if value.strip() == '1' else 'FLC'
+    if glob.glob(os.path.join(dolphot_dir, '*_flt.fits')):
+        return 'FLT'
+    if glob.glob(os.path.join(dolphot_dir, '*_flc.fits')):
+        return 'FLC'
+    return None
+
+
+def _exposures_used(dolphot_dir):
+    """Rootnames (e.g. ``ifmyaaa1q``) of the exposures listed in a reduction's
+    ``phot_pars``, not counting the DRC reference image."""
+    roots = set()
+    pars = os.path.join(dolphot_dir, 'phot_pars')
+    if os.path.isfile(pars):
+        with open(pars) as f:
+            for line in f:
+                key, sep, value = line.partition('=')
+                if sep and key.startswith('img') and key.endswith('_file') and key != 'img0_file':
+                    roots.add(value.strip().rsplit('_', 1)[0])
+    return roots
+
+
+# Photometry outputs HCNS_first_CMDs.py writes to a target's output directory.
+FIRST_CMDS_OUTPUTS = ['phot_*.csv', 'CMD_*.pdf', 'completeness*.dat', 'completeness*.pdf']
+
+
+def _supersede(dolphot_dir, image_type):
+    """Set a target's reduction aside so it is reduced again from the start.
+
+    Moves the reduction directory to ``../reduction/<type>_superseded/`` and the
+    photometry outputs of HCNS_first_CMDs.py (``FIRST_CMDS_OUTPUTS``) to
+    ``../output/<type>_superseded/``, under the same relative path (with a time
+    stamp added if that already exists). Other files in the output directory,
+    such as the RGB images, are left in place. Nothing is deleted. Returns the
+    paths moved to.
+    """
+    rel = os.path.relpath(dolphot_dir, reduction_root)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    moved = []
+    dest = os.path.join(reduction_root, f'{image_type.lower()}_superseded', rel)
+    if os.path.exists(dest):
+        dest = f'{dest}_{stamp}'
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.move(dolphot_dir, dest)
+    moved.append(dest)
+    out_dir = os.path.join(output_root, rel)
+    outputs = [p for pattern in FIRST_CMDS_OUTPUTS for p in glob.glob(os.path.join(out_dir, pattern))]
+    if outputs:
+        out_dest = os.path.join(output_root, f'{image_type.lower()}_superseded', rel)
+        if os.path.exists(out_dest):
+            out_dest = f'{out_dest}_{stamp}'
+        os.makedirs(out_dest)
+        for p in outputs:
+            shutil.move(p, out_dest)
+        moved.append(out_dest)
+    return moved
+
+
+def _check_image_type(path, reduct_dir):
+    """Before prep, handle a reduction made with the other kind of exposure (FLT
+    or FLC) than this run uses (``CTE``).
+
+    An unfinished one (no ``dolphot.done``, including ``align.failed``) is set
+    aside with ``_supersede`` and the target is reduced again with this run's
+    kind. A finished one is kept, with a warning, unless ``--redo-flt`` was given
+    and it used FLT, in which case it is set aside and redone with FLC (but kept
+    if the FLC file of any exposure it used has not been downloaded).
+    """
+    target = os.path.basename(path)
+    dolphot_dir = os.path.join(reduct_dir, target)
+    if not os.path.isdir(dolphot_dir):
+        return
+    wanted = 'FLT' if CTE else 'FLC'
+    have = _reduction_image_type(dolphot_dir)
+    if have is None or have == wanted:
+        return
+    finished = os.path.isfile(os.path.join(dolphot_dir, 'dolphot.done'))
+    if finished and not (args.redo_flt and have == 'FLT'):
+        hint = ' Run with --redo-flt to re-reduce it with FLC exposures.' if have == 'FLT' else ''
+        global_logger.warning(f'{target}: finished reduction used {have} exposures; kept.{hint}')
+        return
+    if finished:
+        missing = sorted(r for r in _exposures_used(dolphot_dir)
+                         if not os.path.isfile(os.path.join(path, f'{r}_flc.fits')))
+        if missing:
+            global_logger.warning(f'{target}: FLC files missing for {", ".join(missing)}; finished FLT '
+                                  f'reduction kept. Download them to re-reduce it with --redo-flt.')
+            return
+    moved = _supersede(dolphot_dir, have)
+    global_logger.warning(f'{target}: {"finished" if finished else "unfinished"} {have} reduction moved to '
+                          f'{" and ".join(moved)}; reducing it again with {wanted} exposures.')
+
+
 def _set_alignment(dolphot_dir, ref_rootname, align_level):
     """Set the reference image and the Align block (always the last lines) of
     phot_pars for one alignment attempt."""
@@ -287,7 +406,10 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
         Root reduction directory containing per-target subdirectories.
     CTE : bool, optional
         If ``True``, use FLT (non-CTE-corrected) exposures and enable
-        ``useCTE`` in the parameter file.  Default is ``False``.
+        ``useCTE`` in the parameter file; otherwise use FLC exposures, which the
+        STScI pipeline has corrected for CTE, with ``useCTE = 0``.  Default is
+        ``False``.  A target is skipped if any exposure in its two selected
+        filters lacks the chosen kind of file.
     align_iter : int, optional
         ``AlignIter`` value written to ``phot_pars``.  Default is ``5``.
     verbose : bool, optional
@@ -319,11 +441,11 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
     #Create log for dolphot run for this target
     dolphot_logger = make_logger("dolphot", filename=os.path.join(dolphot_dir, f"{target}_dolphot.log"))
 
-    #Find all raw files that were downloaded
-    if CTE:
-        raw_expfilelist = glob.glob(os.path.join(target_dir,'*flt.fits'))
-    else:
-        raw_expfilelist = glob.glob(os.path.join(target_dir,'*flc.fits'))
+    #Find all raw files that were downloaded: exposures of the kind used (FLT or FLC),
+    #and of the other kind, to check that none is missing
+    exp_kind, other_kind = ('FLT', 'FLC') if CTE else ('FLC', 'FLT')
+    raw_expfilelist = glob.glob(os.path.join(target_dir, f'*{exp_kind.lower()}.fits'))
+    raw_otherfilelist = glob.glob(os.path.join(target_dir, f'*{other_kind.lower()}.fits'))
     raw_drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
 
     # Determine instrument and available filters from the raw DRC files, then
@@ -379,6 +501,21 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
     drizfilelist = [os.path.join(dolphot_dir, os.path.basename(p)) for p in selected_drz]
 
     if prep_needed:
+        # Every exposure of the selected filters must exist as the kind of file used, so
+        # CTE treatments are never mixed within a target.
+        selected_other = [p for p in raw_otherfilelist if _header_filter(p, instrument) in selected_filters]
+        exp_root = lambda p: os.path.basename(p).rsplit('_', 1)[0]
+        missing = sorted({exp_root(p) for p in selected_other} - {exp_root(p) for p in selected_exp})
+        if not selected_exp or missing:
+            if not selected_exp:
+                problem = f'no {exp_kind} exposures in {sorted(selected_filters)}'
+            else:
+                problem = f'{exp_kind} files missing for {", ".join(missing)} (only {other_kind} files found)'
+            alternative = ', or run with --flt to use the FLT exposures' if exp_kind == 'FLC' else ''
+            global_logger.error(f'{target}: {problem}; skipping dolphot prep. Download the {exp_kind} '
+                                f'files{alternative}.')
+            close_logger(dolphot_logger)
+            return None
         # Make sure the downloaded files are complete before using them.
         bad = [(p, problem) for p in selected_exp + selected_drz if (problem := _fits_problem(p))]
         if bad:
@@ -838,7 +975,14 @@ else:
 global_logger = make_logger("global", filename=_log_filename)
 
 N_CPU = args.ncpu
-CTE = True
+# FLC exposures (CTE-corrected by the STScI pipeline, useCTE = 0) by default;
+# FLT exposures with dolphot's own CTE correction (useCTE = 1) with --flt.
+CTE = args.flt
+if args.ast:
+    global_logger.info("Extra ASTs use each target's existing parameter file (FLT or FLC as it was reduced).")
+else:
+    global_logger.info('Using FLT exposures with dolphot\'s CTE correction (--flt).' if CTE else
+                       'Using FLC exposures (CTE-corrected by the STScI pipeline).')
 
 if args.archival:
     prog_dirs = sorted(d for d in glob.glob(os.path.join(data_dir, '*')) if os.path.isdir(d))
@@ -862,6 +1006,8 @@ if args.archival:
                 delayed(_run_extra_ast_if_ready)(path, rdir, iteration)
                 for path, rdir in all_path_reduct)
     else:
+        for path, rdir in all_path_reduct:
+            _check_image_type(path, rdir)
         global_logger.info('Running dolphot prep across all archival programs.')
         Parallel(n_jobs=N_CPU, prefer='threads')(
             delayed(_prep_dolphot)(path, os.path.dirname(path), rdir)
@@ -892,6 +1038,8 @@ else:
     paths = [p for p in glob.glob(os.path.join(data_dir, "*"))
              if os.path.isdir(p) and os.path.basename(p) != 'archival']
 
+    for path in paths:
+        _check_image_type(path, reduct_dir)
     Parallel(n_jobs=N_CPU)(
         delayed(_prep_dolphot)(path, data_dir, reduct_dir)
         for path in paths

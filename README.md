@@ -92,6 +92,38 @@ tests (ASTs).
   are silently skipped (run without `--ast` first to process new targets).
 - `--ncpu` — number of simultaneous dolphot processes (default 10). Lower
   this if running `--ast` locks up the machine.
+- `--flt` — use the FLT exposures with dolphot's own CTE correction instead
+  of the default FLC exposures (see **Exposures** below).
+- `--redo-flt` — re-reduce with FLC exposures the targets whose finished
+  reduction used FLT exposures (see below). Cannot be combined with `--flt`
+  or `--ast`.
+
+**Exposures.** By default dolphot is run on the FLC exposures, which the
+STScI pipeline has already corrected for CTE, with `useCTE = 0`. With
+`--flt` it uses the FLT exposures and dolphot's own CTE correction
+(`useCTE = 1`); dolphot has no CTE correction for WFC3, so WFC3 FLT
+photometry is uncorrected. A target is skipped, with an error naming the
+missing exposures, if any exposure in its two selected filters lacks the
+kind of file being used: download it, or use `--flt`. Extra ASTs (`--ast`)
+use the same kind of exposure as the target's reduction.
+
+**Reductions made with the other kind of exposure.** Before prep, each
+target's reduction is checked (from the `useCTE` line of its `phot_pars`):
+- A finished reduction (`dolphot.done`) is kept, with a warning in the log.
+- An unfinished one (including `align.failed`) is moved to
+  `../reduction/flt_superseded/` (or `flc_superseded/`) and the target is
+  reduced again from the start.
+- With `--redo-flt`, finished FLT reductions are also moved to
+  `../reduction/flt_superseded/` and reduced again with FLC. The photometry
+  outputs of `HCNS_first_CMDs.py` (`phot_*.csv`, `CMD_*.pdf`,
+  `completeness*`) are moved to `../output/flt_superseded/`, while the RGB
+  images stay in place. A finished reduction is kept if the FLC file of any
+  of its exposures has not been downloaded.
+
+Nothing is deleted: each moved directory keeps its relative path (e.g.
+`flt_superseded/archival/<prog>/<target>`), with a time stamp added if that
+already exists. Afterwards, run `HCNS_first_CMDs.py` to remake the catalogs
+and CMDs, and `--ast` for the extra ASTs.
 
 **Archival parallelism.** In `--archival` mode, targets from every archival
 project are flattened into a single pool before each stage (prep, dolphot,
@@ -117,8 +149,9 @@ validated by requiring every per-image sigma ≤ 0.75 and every matched-star
 count ≥ 15.
 
 **Marker files** (per target, in the reduction directory) gate each step so
-re-runs skip completed work: `<instr>mask.done`, `splitgroups.done`,
-`calcsky.done`, `align.done` / `align.failed`, `dolphot.done`,
+re-runs skip completed work: `prep.done` (copying, `phot_pars`, masking,
+`splitgroups` and `calcsky`, done as one unit; an interrupted prep is cleared
+and started again), `align.done` / `align.failed`, `dolphot.done`,
 `fakestars.done`, `fakestars_NN.done` (extra `--ast` iterations). Delete the
 relevant marker (and any it depends on) to force a re-run of that step.
 
