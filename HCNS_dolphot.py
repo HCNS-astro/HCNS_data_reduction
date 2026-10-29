@@ -1,5 +1,5 @@
 import os, sys, glob, numpy, argparse
-import shutil, subprocess, logging, warnings, time
+import shutil, subprocess, logging, warnings, time, textwrap
 from astropy.io import fits
 from joblib import Parallel, delayed
 
@@ -18,16 +18,14 @@ parser.add_argument('--flt', action='store_true',
                     help="Use FLT exposures with dolphot's own CTE correction (useCTE = 1) instead of the "
                          "default FLC exposures, which the STScI pipeline has already corrected for CTE "
                          "(useCTE = 0). Note that dolphot has no CTE correction for WFC3.")
-parser.add_argument('--redo-flt', action='store_true',
-                    help='Re-reduce with FLC exposures the targets whose finished reduction used FLT '
-                         'exposures: their reduction directories, and the photometry outputs of '
-                         'HCNS_first_CMDs.py, are moved to ../reduction/flt_superseded/ and '
-                         '../output/flt_superseded/, and the targets are reduced again from the start.')
+parser.add_argument('--redo-stale', action='store_true',
+                    help='Re-reduce from the start the targets whose data files are newer than their '
+                         'photometry (those in HCNS_dolphot_stale.txt; archival targets with --archival): '
+                         'their reduction directories, and the photometry outputs of HCNS_first_CMDs.py, '
+                         'are moved to ../reduction/stale_superseded/ and ../output/stale_superseded/.')
 args = parser.parse_args()
-if args.flt and args.redo_flt:
-    parser.error('--flt and --redo-flt cannot be used together.')
-if args.ast and args.redo_flt:
-    parser.error('--redo-flt cannot be combined with --ast; run it without --ast first.')
+if args.ast and args.redo_stale:
+    parser.error('--redo-stale cannot be combined with --ast; run it without --ast first.')
 
 if args.archival:
     data_dir   = os.path.abspath(os.path.join(code_dir, '..', 'data', 'archival'))
@@ -240,12 +238,13 @@ def _exposures_used(dolphot_dir):
 FIRST_CMDS_OUTPUTS = ['phot_*.csv', 'CMD_*.pdf', 'completeness*.dat', 'completeness*.pdf']
 
 
-def _supersede(dolphot_dir, image_type):
+def _supersede(dolphot_dir, reason):
     """Set a target's reduction aside so it is reduced again from the start.
 
-    Moves the reduction directory to ``../reduction/<type>_superseded/`` and the
+    Moves the reduction directory to ``../reduction/<reason>_superseded/`` and the
     photometry outputs of HCNS_first_CMDs.py (``FIRST_CMDS_OUTPUTS``) to
-    ``../output/<type>_superseded/``, under the same relative path (with a time
+    ``../output/<reason>_superseded/`` (``reason``: ``'flt'``, ``'flc'`` or
+    ``'stale'``), under the same relative path (with a time
     stamp added if that already exists). Other files in the output directory,
     such as the RGB images, are left in place. Nothing is deleted. Returns the
     paths moved to.
@@ -253,7 +252,7 @@ def _supersede(dolphot_dir, image_type):
     rel = os.path.relpath(dolphot_dir, reduction_root)
     stamp = time.strftime('%Y%m%d-%H%M%S')
     moved = []
-    dest = os.path.join(reduction_root, f'{image_type.lower()}_superseded', rel)
+    dest = os.path.join(reduction_root, f'{reason}_superseded', rel)
     if os.path.exists(dest):
         dest = f'{dest}_{stamp}'
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -262,7 +261,7 @@ def _supersede(dolphot_dir, image_type):
     out_dir = os.path.join(output_root, rel)
     outputs = [p for pattern in FIRST_CMDS_OUTPUTS for p in glob.glob(os.path.join(out_dir, pattern))]
     if outputs:
-        out_dest = os.path.join(output_root, f'{image_type.lower()}_superseded', rel)
+        out_dest = os.path.join(output_root, f'{reason}_superseded', rel)
         if os.path.exists(out_dest):
             out_dest = f'{out_dest}_{stamp}'
         os.makedirs(out_dest)
@@ -278,9 +277,7 @@ def _check_image_type(path, reduct_dir):
 
     An unfinished one (no ``dolphot.done``, including ``align.failed``) is set
     aside with ``_supersede`` and the target is reduced again with this run's
-    kind. A finished one is kept, with a warning, unless ``--redo-flt`` was given
-    and it used FLT, in which case it is set aside and redone with FLC (but kept
-    if the FLC file of any exposure it used has not been downloaded).
+    kind. A finished one is kept, with a warning.
     """
     target = os.path.basename(path)
     dolphot_dir = os.path.join(reduct_dir, target)
@@ -291,20 +288,13 @@ def _check_image_type(path, reduct_dir):
     if have is None or have == wanted:
         return
     finished = os.path.isfile(os.path.join(dolphot_dir, 'dolphot.done'))
-    if finished and not (args.redo_flt and have == 'FLT'):
-        hint = ' Run with --redo-flt to re-reduce it with FLC exposures.' if have == 'FLT' else ''
-        global_logger.warning(f'{target}: finished reduction used {have} exposures; kept.{hint}')
-        return
     if finished:
-        missing = sorted(r for r in _exposures_used(dolphot_dir)
-                         if not os.path.isfile(os.path.join(path, f'{r}_flc.fits')))
-        if missing:
-            global_logger.warning(f'{target}: FLC files missing for {", ".join(missing)}; finished FLT '
-                                  f'reduction kept. Download them to re-reduce it with --redo-flt.')
-            return
-    moved = _supersede(dolphot_dir, have)
-    global_logger.warning(f'{target}: {"finished" if finished else "unfinished"} {have} reduction moved to '
-                          f'{" and ".join(moved)}; reducing it again with {wanted} exposures.')
+        global_logger.warning(f'{target}: finished reduction used {have} exposures; kept. To re-reduce it with '
+                              f'{wanted} exposures, move its reduction directory out of the way.')
+        return
+    moved = _supersede(dolphot_dir, have.lower())
+    global_logger.warning(f'{target}: unfinished {have} reduction moved to {" and ".join(moved)}; '
+                          f'reducing it again with {wanted} exposures.')
 
 
 def _set_alignment(dolphot_dir, ref_rootname, align_level):
@@ -863,18 +853,90 @@ def run_dolphot(target, reduct_dir, fake_stars=False, verbose=False, iteration=N
     
 
 
+# Every target (HCNS and archival) whose data are newer than its photometry; rewritten on every run.
+STALE_LIST = os.path.join(code_dir, 'HCNS_dolphot_stale.txt')
+
+
+def _newer_data(path, dolphot_dir):
+    """The data files (``*.fits`` in ``path``) modified after the target's photometry
+    finished (``dolphot.done``), as ``(dolphot.done mtime, [(mtime, name), ...])``,
+    newest first; ``None`` if the photometry hasn't finished or no file is newer."""
+    done_file = os.path.join(dolphot_dir, 'dolphot.done')
+    if not os.path.isfile(done_file):
+        return None
+    done_mtime = os.path.getmtime(done_file)
+    newer = sorted(((os.path.getmtime(f), os.path.basename(f)) for f in glob.glob(os.path.join(path, '*.fits'))
+                    if os.path.getmtime(f) > done_mtime), reverse=True)
+    return (done_mtime, newer) if newer else None
+
+
 def _check_stale(path, reduct_dir):
     """Log a warning if any input data file is newer than dolphot.done."""
     target = os.path.basename(path)
-    done_file = os.path.join(reduct_dir, target, "dolphot.done")
-    if os.path.isfile(done_file):
-        done_mtime = os.path.getmtime(done_file)
-        data_files = glob.glob(os.path.join(path, '*.fits'))
-        if data_files and max(os.path.getmtime(f) for f in data_files) > done_mtime:
-            global_logger.warning(
-                f'{target}: input data files are newer than dolphot.done. '
-                f'Delete dolphot.done and align.done to trigger a re-run.'
-            )
+    if _newer_data(path, os.path.join(reduct_dir, target)):
+        global_logger.warning(f'{target}: input data files are newer than dolphot.done. '
+                              f'Run with --redo-stale to re-reduce it with the new data.')
+
+
+def _write_stale_list():
+    """Rewrite ``STALE_LIST`` with every target, HCNS and archival, whose data files
+    are newer than its photometry, whichever kind of run this is. A target drops off
+    once its photometry has been re-run. Returns the number of targets listed."""
+    data_root = os.path.abspath(os.path.join(code_dir, '..', 'data'))
+    targets = [p for p in sorted(glob.glob(os.path.join(data_root, '*')))
+               if os.path.isdir(p) and os.path.basename(p) != 'archival']
+    targets += [p for p in sorted(glob.glob(os.path.join(data_root, 'archival', '*', '*'))) if os.path.isdir(p)]
+    stamp = lambda t: time.strftime('%Y-%m-%d %H:%M', time.localtime(t))
+    rows = []
+    for path in targets:
+        rel = os.path.relpath(path, data_root)   # <target>, or archival/<prog>/<target>
+        stale = _newer_data(path, os.path.join(reduction_root, rel))
+        if stale:
+            done_mtime, newer = stale
+            files = ', '.join(name for _, name in newer[:3]) + (f' and {len(newer) - 3} more' if len(newer) > 3 else '')
+            rows.append((rel, stamp(done_mtime), stamp(newer[0][0]), str(len(newer)), files))
+    lines = ['# Targets whose data files are newer than their dolphot photometry (dolphot.done).',
+             f'# Updated {time.strftime("%Y-%m-%d %H:%M")}. HCNS_dolphot.py rewrites this list on every run;',
+             '# a target drops off once its photometry has been re-run.']
+    hint = ('To re-reduce them with their new data, run HCNS_dolphot.py with --redo-stale (and with '
+            '--archival --redo-stale for archival targets); their old reductions are moved to '
+            '../reduction/stale_superseded/.')
+    lines += ['# ' + line for line in textwrap.wrap(hint, 86)] + ['']
+    if rows:
+        header = ('target', 'photometry run', 'newest data', 'newer files', 'names')
+        widths = [max(len(r[k]) for r in rows + [header]) for k in range(4)]
+        for r in [header] + rows:
+            lines.append('  '.join(v.ljust(w) for v, w in zip(r, widths)) + '  ' + r[4])
+    else:
+        lines.append('None: every target with photometry is up to date with its data.')
+    tmp = f'{STALE_LIST}.{os.getpid()}.tmp'   # unique, as HCNS and archival runs may overlap
+    with open(tmp, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    os.replace(tmp, STALE_LIST)
+    return len(rows)
+
+
+def _redo_stale(path, reduct_dir):
+    """``--redo-stale``: if the target's data files are newer than its photometry,
+    set its reduction aside with ``_supersede`` so it is reduced again from the
+    start with the new data. Deleting only the step markers would not do: the
+    images copied by the earlier prep would be reused. The reduction is kept, with
+    a warning, if any exposure it used lacks the kind of file this run uses (FLT
+    or FLC), as it could not be redone."""
+    target = os.path.basename(path)
+    dolphot_dir = os.path.join(reduct_dir, target)
+    if not _newer_data(path, dolphot_dir):
+        return
+    kind = 'FLT' if CTE else 'FLC'
+    missing = sorted(r for r in _exposures_used(dolphot_dir)
+                     if not os.path.isfile(os.path.join(path, f'{r}_{kind.lower()}.fits')))
+    if missing:
+        global_logger.warning(f'{target}: data newer than its photometry, but {kind} files missing for '
+                              f'{", ".join(missing)}; reduction kept.')
+        return
+    moved = _supersede(dolphot_dir, 'stale')
+    global_logger.warning(f'{target}: data newer than its photometry; reduction moved to {" and ".join(moved)}, '
+                          f'reducing it again with {kind} exposures.')
 
 
 def _prep_dolphot(path, data_dir, reduct_dir):
@@ -984,8 +1046,11 @@ else:
     global_logger.info('Using FLT exposures with dolphot\'s CTE correction (--flt).' if CTE else
                        'Using FLC exposures (CTE-corrected by the STScI pipeline).')
 
+# The list of targets with data newer than their photometry, here and again at the end of the run.
+_write_stale_list()
+
 if args.archival:
-    prog_dirs = sorted(d for d in glob.glob(os.path.join(data_dir, '*')) if os.path.isdir(d))
+    prog_dirs =sorted(d for d in glob.glob(os.path.join(data_dir, '*')) if os.path.isdir(d))
     # Flatten (path, reduct_dir) across all archival projects so dolphot can
     # run simultaneously across projects, not just within a single one --
     # most archival programs have only 1-2 targets, which previously left
@@ -1007,6 +1072,8 @@ if args.archival:
                 for path, rdir in all_path_reduct)
     else:
         for path, rdir in all_path_reduct:
+            if args.redo_stale:
+                _redo_stale(path, rdir)
             _check_image_type(path, rdir)
         global_logger.info('Running dolphot prep across all archival programs.')
         Parallel(n_jobs=N_CPU, prefer='threads')(
@@ -1039,6 +1106,8 @@ else:
              if os.path.isdir(p) and os.path.basename(p) != 'archival']
 
     for path in paths:
+        if args.redo_stale:
+            _redo_stale(path, reduct_dir)
         _check_image_type(path, reduct_dir)
     Parallel(n_jobs=N_CPU)(
         delayed(_prep_dolphot)(path, data_dir, reduct_dir)
@@ -1062,3 +1131,6 @@ else:
         delayed(_run_dolphot_if_ready)(path, reduct_dir, fake_stars=True)
         for path in paths
     )
+
+n_stale = _write_stale_list()
+global_logger.info(f'{n_stale} target(s) with data newer than their photometry, listed in {STALE_LIST}.')

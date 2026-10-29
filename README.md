@@ -94,9 +94,9 @@ tests (ASTs).
   this if running `--ast` locks up the machine.
 - `--flt` — use the FLT exposures with dolphot's own CTE correction instead
   of the default FLC exposures (see **Exposures** below).
-- `--redo-flt` — re-reduce with FLC exposures the targets whose finished
-  reduction used FLT exposures (see below). Cannot be combined with `--flt`
-  or `--ast`.
+- `--redo-stale` — re-reduce from the start the targets whose data are newer
+  than their photometry (see **Data newer than the photometry** below).
+  Cannot be combined with `--ast`.
 
 **Exposures.** By default dolphot is run on the FLC exposures, which the
 STScI pipeline has already corrected for CTE, with `useCTE = 0`. With
@@ -110,20 +110,11 @@ use the same kind of exposure as the target's reduction.
 **Reductions made with the other kind of exposure.** Before prep, each
 target's reduction is checked (from the `useCTE` line of its `phot_pars`):
 - A finished reduction (`dolphot.done`) is kept, with a warning in the log.
+  To re-reduce it with the other kind, move its reduction directory out of
+  the way.
 - An unfinished one (including `align.failed`) is moved to
   `../reduction/flt_superseded/` (or `flc_superseded/`) and the target is
   reduced again from the start.
-- With `--redo-flt`, finished FLT reductions are also moved to
-  `../reduction/flt_superseded/` and reduced again with FLC. The photometry
-  outputs of `HCNS_first_CMDs.py` (`phot_*.csv`, `CMD_*.pdf`,
-  `completeness*`) are moved to `../output/flt_superseded/`, while the RGB
-  images stay in place. A finished reduction is kept if the FLC file of any
-  of its exposures has not been downloaded.
-
-Nothing is deleted: each moved directory keeps its relative path (e.g.
-`flt_superseded/archival/<prog>/<target>`), with a time stamp added if that
-already exists. Afterwards, run `HCNS_first_CMDs.py` to remake the catalogs
-and CMDs, and `--ast` for the extra ASTs.
 
 **Archival parallelism.** In `--archival` mode, targets from every archival
 project are flattened into a single pool before each stage (prep, dolphot,
@@ -154,6 +145,28 @@ re-runs skip completed work: `prep.done` (copying, `phot_pars`, masking,
 and started again), `align.done` / `align.failed`, `dolphot.done`,
 `fakestars.done`, `fakestars_NN.done` (extra `--ast` iterations). Delete the
 relevant marker (and any it depends on) to force a re-run of that step.
+
+**Data newer than the photometry.** At the start and end of every run (any
+mode), `HCNS_dolphot_stale.txt` in the directory the script is run from is
+rewritten with every target, HCNS and archival, that has data files in
+`../data/` modified after its photometry finished (`dolphot.done`). Each entry
+gives when the photometry ran, the newest data file's time, and the newer files.
+A target drops off the list once its photometry has been re-run.
+
+To re-reduce these targets with their new data, run with `--redo-stale` (and
+with `--archival --redo-stale` for archival targets). Each one's reduction
+directory is moved to `../reduction/stale_superseded/`, and the photometry
+outputs of `HCNS_first_CMDs.py` (`phot_*.csv`, `CMD_*.pdf`, `completeness*`)
+to `../output/stale_superseded/`, while the RGB images stay in place; then the
+target is reduced again from the start, with the kind of exposure the run uses.
+A target is kept if any exposure its reduction used lacks that kind of file.
+Deleting only the markers would not do: alignment and photometry would re-run
+on the images copied during the earlier prep.
+
+Nothing is deleted when a reduction is moved aside: each moved directory keeps
+its relative path (e.g. `stale_superseded/archival/<prog>/<target>`), with a
+time stamp added if that already exists. Afterwards, run `HCNS_first_CMDs.py`
+to remake the catalogs and CMDs, and `--ast` for the extra ASTs.
 
 ---
 
