@@ -7,12 +7,13 @@ dependencies:
   - jupyter
   - notebook
   - numpy
-  - astropy
+  - astropy>=7.0  # astropy.visualization.make_rgb (HCNS_RGB_images.py)
   - matplotlib
   - reproject
   - photutils
   - astroquery
   - astroalign
+  - scikit-image
   - pandas
   - tqdm
   - scipy
