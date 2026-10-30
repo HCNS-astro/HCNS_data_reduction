@@ -6,6 +6,10 @@ filters, aligns the blue-filter image to the red-filter frame (trying
 astroalign first, then a star-cloud ICP method, then WCS-only reprojection),
 and saves a three-colour composite PNG alongside individual greyscale PNGs.
 
+Targets are processed in parallel, ``--ncpu`` at a time. Each target's log
+messages are written as one block when it finishes, and a target that fails is
+logged and skipped without stopping the others.
+
 Outputs (per target, under ``out_dir/<target>/``)
 -------------------------------------------------
 <target>_<blue_filter>_greyscale.png
@@ -18,6 +22,8 @@ import sys, os, glob, shutil, logging, copy
 import numpy as np
 import pandas as pd
 from astropy.io import fits
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from astropy.visualization import ImageNormalize, ZScaleInterval, LinearStretch, make_rgb, ManualInterval
 from astropy.wcs import WCS
@@ -30,10 +36,14 @@ import astropy.units as u
 from scipy.spatial import KDTree
 from skimage.transform import AffineTransform
 import cv2
+from joblib import Parallel, delayed
 
 parser = argparse.ArgumentParser(description='Create RGB images for HCNS targets.')
 parser.add_argument('--overwrite', action='store_true',
                     help='Regenerate images even if they already exist.')
+parser.add_argument('--ncpu', type=int, default=10,
+                    help='Number of targets processed simultaneously (default: 10). Each one holds its '
+                         'images in memory, so lower this if memory runs short.')
 args = parser.parse_args()
 
 verbose = False
@@ -248,6 +258,23 @@ def make_logger(name, filename, level=logging.INFO):
     logger.addHandler(ch)
     return logger
 
+class _RecordCollector(logging.Handler):
+    """Logging handler that keeps records in a list, so that a worker can
+    send one target's log messages back to the main process."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        # Bake any traceback into the message text and drop the exc_info,
+        # which cannot be pickled, so the record can be sent between processes.
+        record.msg = self.format(record)
+        record.args = None
+        record.exc_info = None
+        record.exc_text = None
+        self.records.append(record)
+
 logger = make_logger("RGB_images", filename="HCNS_RGB_images.log")
 
 
@@ -274,7 +301,17 @@ for prog_dir in sorted(glob.glob(os.path.join(archival_data_base, '*'))):
                 os.path.basename(target_path),
             ))
 
-for eff_data_dir, eff_out_dir, target in all_targets:
+def _process_target(eff_data_dir, eff_out_dir, target):
+    """Make the greyscale and RGB images for one target.
+
+    Parameters
+    ----------
+    eff_data_dir, eff_out_dir : str
+        Data and output directories holding this target's subdirectory
+        (the HCNS ones, or one archival program's).
+    target : str
+        Target name.
+    """
     target_dir = os.path.join(eff_data_dir,target)
     target_out_dir = os.path.join(eff_out_dir,target)
     
@@ -288,7 +325,7 @@ for eff_data_dir, eff_out_dir, target in all_targets:
             )
         if verbose:
             logger.info(f'Images already exist and will not be regenerated.')
-        continue
+        return
     else:
         logger.info(f'Making images for {target}.')
         os.makedirs(target_out_dir, exist_ok=True)
@@ -316,7 +353,7 @@ for eff_data_dir, eff_out_dir, target in all_targets:
                 elif 'CLEAR' not in header['FILTER2']:
                     filtername = header['FILTER2']
                 else:
-                    global_logger.error('No filter identified.')
+                    logger.error('No filter identified.')
         filters.append(filtername)
         hdu.close()
     # Longest wavelength (reddest) first; this ordering sets the RGB reference
@@ -348,7 +385,7 @@ for eff_data_dir, eff_out_dir, target in all_targets:
 
     if len(filters) < 2 or len(filters) > 3:
         logger.warning(f'{target} has data in {len(filters)} filters. RGB image creation supports 2 or 3. Skipping.')
-        continue
+        return
     logger.info(f'Filters for RGB image (red to blue): {", ".join(filters)}')
 
 
@@ -413,3 +450,56 @@ for eff_data_dir, eff_out_dir, target in all_targets:
     plt.savefig(os.path.join(target_out_dir,f'{target}_RGB.png'),bbox_inches='tight',dpi=200)
     logger.info(f'RGB image saved to: {target}_RGB.png')
     plt.close()
+
+
+def _run_target(eff_data_dir, eff_out_dir, target):
+    """Run ``_process_target`` for one target, collecting its log messages.
+
+    This runs in a joblib worker process, which does not execute this
+    script's top-level code: the logger there has no handlers and matplotlib
+    has its default backend, so both are set up here. Any error is logged and
+    the target skipped, so that it does not stop the other targets.
+
+    Returns
+    -------
+    str, str
+        ``target`` and ``eff_out_dir``.
+    list of logging.LogRecord
+        The target's log messages, for the main process to write out as one
+        block.
+    bool
+        ``False`` if processing raised an exception.
+    """
+    target_logger = logging.getLogger("RGB_images")
+    saved = target_logger.handlers[:], target_logger.level, target_logger.propagate
+    collector = _RecordCollector()
+    target_logger.handlers = [collector]
+    target_logger.setLevel(logging.INFO)
+    target_logger.propagate = False
+    ok = True
+    try:
+        matplotlib.use('Agg')
+        _process_target(eff_data_dir, eff_out_dir, target)
+    except Exception:
+        target_logger.exception(f'Making images for {target} ({eff_out_dir}) failed; skipping it.')
+        ok = False
+    finally:
+        plt.close('all')
+        target_logger.handlers, level, target_logger.propagate = saved
+        target_logger.setLevel(level)
+    return target, eff_out_dir, collector.records, ok
+
+
+logger.info(f'Processing {len(all_targets)} target(s), up to {args.ncpu} at a time.')
+failed = []
+results = Parallel(n_jobs=args.ncpu, return_as='generator_unordered')(
+    delayed(_run_target)(*entry) for entry in all_targets)
+for target, eff_out_dir, records, ok in results:
+    # Write each target's messages together, as soon as that target is done.
+    for record in records:
+        logger.handle(record)
+    if not ok:
+        failed.append(f'{target} ({eff_out_dir})')
+if failed:
+    logger.warning(f'{len(failed)} target(s) failed and were skipped (tracebacks above): '
+                   f'{", ".join(failed)}')

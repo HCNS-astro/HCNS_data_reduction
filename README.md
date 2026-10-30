@@ -213,7 +213,15 @@ Produces one greyscale PNG per filter and a three-colour composite PNG per
 target, reading DRC images directly from the download directory (not the
 dolphot reduction directory).
 
-**Flag:** `--overwrite` — regenerate images even if they already exist.
+**Flags:**
+- `--overwrite` — regenerate images even if they already exist.
+- `--ncpu` — number of targets processed simultaneously (default 10). Each
+  holds its images in memory, so lower this if memory runs short.
+
+**Parallel runs.** As in `HCNS_first_CMDs.py`: each target's messages are
+written to `HCNS_RGB_images.log` (and the screen) as one block when that
+target finishes, and a target that raises an error is logged and skipped,
+with the failed targets listed at the end of the run.
 
 Supports targets with **2 or 3 filters** (more or fewer are skipped with a
 warning). Filters are ordered longest-to-shortest wavelength; the reddest
