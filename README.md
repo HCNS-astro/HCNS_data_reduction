@@ -181,7 +181,18 @@ For each target with completed dolphot photometry:
 - If AST results are available, fits completeness-limit curves as a function
   of F814W magnitude and F606W−F814W colour.
 
-**Flag:** `--overwrite` — reprocess outputs even if they already exist.
+**Flags:**
+- `--overwrite` — reprocess outputs even if they already exist.
+- `--ncpu` — number of targets processed simultaneously (default 10). Each
+  holds its full photometry or AST catalog in memory, so lower this if
+  memory runs short.
+
+**Parallel runs.** Targets are processed `--ncpu` at a time. Each target's
+messages are written to `HCNS_first_CMDs.log` (and the screen) as one block
+when that target finishes, so blocks appear in completion order rather than
+target order. A target that raises an error has its traceback logged in its
+block and is skipped; the others carry on, and the failed targets are listed
+at the end of the run.
 
 **AST auto-update.** If `--ast` has produced additional `_01`–`_09`
 iterations since the last run, the completeness fit is automatically

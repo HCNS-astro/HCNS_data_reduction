@@ -13,6 +13,10 @@ If AST results are also available, the script fits completeness curves as a
 function of F814W magnitude and F606W–F814W colour and saves the parameters
 to ``completeness.dat``.
 
+Targets are processed in parallel, ``--ncpu`` at a time. Each target's log
+messages are written as one block when it finishes, and a target that fails is
+logged and skipped without stopping the others.
+
 Outputs (per target, under ``out_dir/<target>/``)
 -------------------------------------------------
 phot_full.csv
@@ -33,24 +37,33 @@ import os, sys, glob, numpy, scipy, pandas
 import shutil, subprocess, logging
 from astropy.io import fits
 from astropy.table import Table
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.wcs import WCS
 from astropy.wcs.utils import pixel_to_skycoord
 from dustmaps.sfd import SFDQuery
+from joblib import Parallel, delayed
 
 
-plt.rcParams.update({
+# Applied around each target's processing in _run_target (worker processes
+# do not run this script's top-level code, so a global rcParams update here
+# would not reach them).
+PLOT_STYLE = {
     "font.family": "STIXGeneral",
     "mathtext.fontset": "stix",
     "font.size": 18
-})
+}
 
 
 parser = argparse.ArgumentParser(description='Generate initial CMDs for HCNS targets.')
 parser.add_argument('--overwrite', action='store_true',
                     help='Reprocess outputs even if they already exist.')
+parser.add_argument('--ncpu', type=int, default=10,
+                    help='Number of targets processed simultaneously (default: 10). Each one holds its '
+                         'full photometry or AST catalog in memory, so lower this if memory runs short.')
 args = parser.parse_args()
 
 code_dir = os.getcwd()
@@ -108,6 +121,23 @@ def close_logger(logger_instance):
     for handler in handlers:
         handler.close()
         logger_instance.removeHandler(handler)
+
+class _RecordCollector(logging.Handler):
+    """Logging handler that keeps records in a list, so that a worker can
+    send one target's log messages back to the main process."""
+
+    def __init__(self):
+        super().__init__()
+        self.records = []
+
+    def emit(self, record):
+        # Bake any traceback into the message text and drop the exc_info,
+        # which cannot be pickled, so the record can be sent between processes.
+        record.msg = self.format(record)
+        record.args = None
+        record.exc_info = None
+        record.exc_text = None
+        self.records.append(record)
 
 
 global_logger = make_logger("global", filename="HCNS_first_CMDs.log")
@@ -487,22 +517,19 @@ def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suff
                     (fake_stars[f'SNR_{red_filter}'] >= min_snr))
     else:
         recovered = fake_stars['recovered'] > 0
-    mag_in = fake_stars[f'{red_filter}_in']
-    color_in = fake_stars[f'{blue_filter}_in'] - fake_stars[f'{red_filter}_in']
+    recovered = recovered.to_numpy(dtype=bool)
+    mag_in = fake_stars[f'{red_filter}_in'].to_numpy()
+    color_in = (fake_stars[f'{blue_filter}_in'] - fake_stars[f'{red_filter}_in']).to_numpy()
 
     global_logger.info(f'Fitting completeness limits for {target}{log_suffix}.')
     for c in range(len(colbins)-1):
         condition = (color_in < colbins[c+1]) & (color_in > colbins[c])
-        fake_stars_colbin = fake_stars[condition]
 
-        comp = numpy.zeros(len(m_bins)-1)
-        cnts = numpy.zeros(len(m_bins)-1)
-
-        for i in fake_stars_colbin.index:
-            j = int(max(min(len(m_bins)-2, numpy.floor((mag_in[i]-m_min)/m_wid)), 0))
-            if recovered[i]:
-                comp[j] += 1.
-            cnts[j] += 1.
+        # Magnitude bin of each star in this colour bin; stars brighter than
+        # m_min or fainter than m_max are counted in the first or last bin.
+        j = numpy.clip(numpy.floor((mag_in[condition]-m_min)/m_wid), 0, len(m_bins)-2).astype(int)
+        comp = numpy.bincount(j[recovered[condition]], minlength=len(m_bins)-1).astype(float)
+        cnts = numpy.bincount(j, minlength=len(m_bins)-1).astype(float)
 
         comp = comp/cnts
         inx = numpy.where(comp > 0.4)[0]
@@ -551,6 +578,31 @@ def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suff
     plt.close()
 
 
+def _load_hcns_sample():
+    """Download the HCNS sample table and add each target's r_e in arcsec.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        Sample table indexed by upper-case target name, or ``None`` if the
+        download failed (no target-region catalogs or CMDs can then be made).
+    """
+    google_sheet_id = '1MFvVh57tIhzc6vUUmrCvDwyYzSojJTZtpqzXfRgC48s'
+    sample_url = f"https://docs.google.com/spreadsheets/d/{google_sheet_id}/export?format=csv"
+    try:
+        hcns_sample = pandas.read_csv(sample_url, skiprows=[1])
+    except Exception as e:
+        global_logger.warning(f'Could not download the HCNS sample table ({e}). '
+                              f'No target CMDs will be produced in this run.')
+        return None
+    hcns_sample['r_e_arcsec'] = (3600*180/(1E6*numpy.pi))*numpy.where(numpy.isfinite(hcns_sample['D_sat']),
+                                                                      hcns_sample['R_e']/hcns_sample['D_sat'],
+                                                                      hcns_sample['R_e']/hcns_sample['D_host'])
+
+    hcns_sample['Name'] = hcns_sample['Name'].str.upper()
+    return hcns_sample.set_index('Name')
+
+
 # HCNS targets -- exclude the 'archival' subdirectory
 all_targets = [(data_dir, reduct_dir, out_dir, os.path.basename(p), 'HCNS')
                for p in glob.glob(os.path.join(data_dir, '*'))
@@ -582,7 +634,22 @@ for _target, _labels in sorted(_locations.items()):
     if len(_labels) > 1:
         global_logger.info(f'{_target} found in: {", ".join(_labels)}')
 
-for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
+def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hcns_sample):
+    """Make the catalogs, CMDs and completeness fits for one target.
+
+    Parameters
+    ----------
+    eff_data_dir, eff_reduct_dir, eff_out_dir : str
+        Data, reduction and output directories holding this target's
+        subdirectory (the HCNS ones, or one archival program's).
+    target : str
+        Target name.
+    label : str
+        Data set the target belongs to (``'HCNS'`` or ``'archival <prog>'``),
+        for log messages.
+    hcns_sample : pandas.DataFrame or None
+        Output of ``_load_hcns_sample``.
+    """
     target_dir = os.path.join(eff_data_dir, target)
     drizfilelist = glob.glob(os.path.join(target_dir,'*drc.fits'))
     instrument = None
@@ -598,7 +665,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
             continue
     if instrument is None:
         global_logger.warning(f'No DRC files in {target_dir}; skipping {target} ({label}).')
-        continue
+        return
 
     os.makedirs(os.path.join(eff_out_dir, target), exist_ok=True)
     phot_pars_file = os.path.join(eff_reduct_dir, target, 'phot_pars')
@@ -632,7 +699,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
 
         if blue_filter is None:
             global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping.')
-            continue
+            return
 
         dolphot_cat, cat_filters = _read_dolphot_catalog(dolphot_outfile)
 
@@ -765,16 +832,6 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
 
 
         # Select the sources within the (circular) 2*r_e of the target
-        google_sheet_id = '1MFvVh57tIhzc6vUUmrCvDwyYzSojJTZtpqzXfRgC48s'
-        sample_url = f"https://docs.google.com/spreadsheets/d/{google_sheet_id}/export?format=csv"
-        hcns_sample = pandas.read_csv(sample_url, skiprows=[1])
-        hcns_sample['r_e_arcsec'] = (3600*180/(1E6*numpy.pi))*numpy.where(numpy.isfinite(hcns_sample['D_sat']),
-                                                                          hcns_sample['R_e']/hcns_sample['D_sat'],
-                                                                          hcns_sample['R_e']/hcns_sample['D_host'])
-
-        hcns_sample['Name'] = hcns_sample['Name'].str.upper()
-        hcns_sample = hcns_sample.set_index('Name')
-
         try:
             target_key = target.upper()
             target_ra, target_dec, target_re = (hcns_sample['RA'][target_key],
@@ -810,7 +867,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
 
         if blue_filter is None:
             global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping AST.')
-            continue
+            return
 
         fake_stars, _ = _read_fake_catalog(ast_file, dolphot_outfile, blue_filter, red_filter)
 
@@ -845,7 +902,7 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
             (_new_extra or not os.path.isfile(ast_full_path) or args.overwrite)):
         if blue_filter is None:
             global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping extra ASTs.')
-            continue
+            return
         global_logger.info(
             f'{len(extra_fake_files)} extra AST file(s) found for {target}. Building full catalog.')
         dfs = [pandas.read_csv(os.path.join(eff_out_dir, target, 'phot_ast.csv'))]
@@ -864,6 +921,57 @@ for eff_data_dir, eff_reduct_dir, eff_out_dir, target, label in all_targets:
                           suffix='_4sig', min_snr=4, log_suffix=' (full AST catalog)', plateau50=True)
 
 
+def _run_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hcns_sample):
+    """Run ``_process_target`` for one target, collecting its log messages.
+
+    This runs in a joblib worker process, which does not execute this
+    script's top-level code: the logger there has no handlers and matplotlib
+    has its default backend and style, so both are set up here. Any error is
+    logged and the target skipped, so that it does not stop the other targets.
+
+    Returns
+    -------
+    str, str
+        ``target`` and ``label``.
+    list of logging.LogRecord
+        The target's log messages, for the main process to write out as one
+        block.
+    bool
+        ``False`` if processing raised an exception.
+    """
+    logger = logging.getLogger("global")
+    saved = logger.handlers[:], logger.level, logger.propagate
+    collector = _RecordCollector()
+    logger.handlers = [collector]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    ok = True
+    try:
+        matplotlib.use('Agg')
+        with plt.rc_context(PLOT_STYLE):
+            _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hcns_sample)
+    except Exception:
+        logger.exception(f'Processing {target} ({label}) failed; skipping it.')
+        ok = False
+    finally:
+        plt.close('all')
+        logger.handlers, level, logger.propagate = saved
+        logger.setLevel(level)
+    return target, label, collector.records, ok
 
 
+hcns_sample = _load_hcns_sample()
 
+global_logger.info(f'Processing {len(all_targets)} target(s), up to {args.ncpu} at a time.')
+failed = []
+results = Parallel(n_jobs=args.ncpu, return_as='generator_unordered')(
+    delayed(_run_target)(*entry, hcns_sample) for entry in all_targets)
+for target, label, records, ok in results:
+    # Write each target's messages together, as soon as that target is done.
+    for record in records:
+        global_logger.handle(record)
+    if not ok:
+        failed.append(f'{target} ({label})')
+if failed:
+    global_logger.warning(f'{len(failed)} target(s) failed and were skipped (tracebacks above): '
+                          f'{", ".join(failed)}')
