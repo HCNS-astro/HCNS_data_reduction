@@ -2,9 +2,11 @@
 Create greyscale and RGB composite images for HCNS survey targets.
 
 For each target, the script reads the drizzled DRC images for both available
-filters, aligns the blue-filter image to the red-filter frame (trying
-astroalign first, then a star-cloud ICP method, then WCS-only reprojection),
-and saves a three-colour composite PNG alongside individual greyscale PNGs.
+filters, removes hot pixels and cosmic rays (outliers with no counterpart in
+any other filter; ``--no-clean`` turns this off), aligns the blue-filter image
+to the red-filter frame (trying astroalign first, then a star-cloud ICP method,
+then WCS-only reprojection), and saves a three-colour composite PNG alongside
+individual greyscale PNGs.
 
 Targets are processed in parallel, ``--ncpu`` at a time. Each target's log
 messages are written as one block when it finishes, and a target that fails is
@@ -34,7 +36,9 @@ from photutils.detection import DAOStarFinder
 from astropy.wcs.utils import pixel_to_skycoord
 import astropy.units as u
 from scipy.spatial import KDTree
-from skimage.transform import AffineTransform
+from scipy.ndimage import (median_filter, maximum_filter, gaussian_filter,
+                           binary_propagation, binary_dilation)
+from skimage.transform import AffineTransform, SimilarityTransform
 import cv2
 from joblib import Parallel, delayed
 
@@ -44,6 +48,8 @@ parser.add_argument('--overwrite', action='store_true',
 parser.add_argument('--ncpu', type=int, default=10,
                     help='Number of targets processed simultaneously (default: 10). Each one holds its '
                          'images in memory, so lower this if memory runs short.')
+parser.add_argument('--no-clean', action='store_true',
+                    help='Use the DRC images as they are, without removing hot pixels and cosmic rays.')
 args = parser.parse_args()
 
 verbose = False
@@ -79,6 +85,7 @@ def icp_affine(src_pts, dst_pts, max_iterations=50, tolerance=0.001):
     dst_tree = KDTree(dst_pts)
     
     prev_error = 0
+    total = np.eye(3)  # product of every iteration's correction
     
     for i in range(max_iterations):
         # 1. Find the nearest neighbor in dst_pts for each point in src
@@ -94,6 +101,7 @@ def icp_affine(src_pts, dst_pts, max_iterations=50, tolerance=0.001):
         # Add a row of ones for matrix multiplication: [x, y, 1]
         src_homo = np.hstack([src, np.ones((src.shape[0], 1))])
         src = (matrix @ src_homo.T).T
+        total = np.vstack([matrix, [0, 0, 1]]) @ total
         
         # Check convergence
         mean_error = np.mean(distances)
@@ -101,9 +109,9 @@ def icp_affine(src_pts, dst_pts, max_iterations=50, tolerance=0.001):
             break
         prev_error = mean_error
 
-    # Convert to 3x3 matrix format of astroalign
-    full_matrix = np.vstack([matrix, [0, 0, 1]])
-    at_object = AffineTransform(matrix=full_matrix)
+    if np.array_equal(total, np.eye(3)):
+        raise RuntimeError('ICP found no transform.')
+    at_object = AffineTransform(matrix=total)
 
     return at_object
 
@@ -182,33 +190,181 @@ def star_cloud_alignment(red_img, red_header, red_wcs, blue_img, blue_header, bl
     match_srcs = match_srcs[match_srcs['color'] > -0.25] #Too blue
 
     #Perform point cloud alignment
-    affine_trans = icp_affine(np.array(list(zip(match_srcs[0:max_points]['xcentroid'],match_srcs[0:max_points]['ycentroid']))),
-                              np.array(list(zip(match_srcs[0:max_points]['xcentroid_blue'],match_srcs[0:max_points]['ycentroid_blue']))))
+    affine_trans = icp_affine(np.array(list(zip(match_srcs[0:max_points]['xcentroid_blue'],match_srcs[0:max_points]['ycentroid_blue']))),
+                              np.array(list(zip(match_srcs[0:max_points]['xcentroid'],match_srcs[0:max_points]['ycentroid']))))
 
     return affine_trans
 
 
-def align_to_reference(sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wcs,
-                       target, filtername, logger):
-    """Align a secondary-filter image onto the reference image's pixel grid.
+# astroalign detection settings, tried in order until one finds a transform. The
+# strict settings go first so that hot pixels and cosmic rays don't crowd the
+# stars out of the control points (the looser ones fail on DW0317M4142).
+ALIGN_ATTEMPTS = [dict(detection_sigma=10, min_area=25),
+                  dict(detection_sigma=4,  min_area=9)]
 
-    Three-tier fallback: 1. astroalign (triangle-matching); 2. star-cloud ICP
-    if astroalign raises ``MaxIterError``; 3. WCS-only reprojection if both
-    alignment methods fail.
+
+def find_transform_to_reference(sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wcs,
+                                target, filtername, logger):
+    """Find the transform from a secondary filter's pixel grid to the reference's.
+
+    Two tiers: 1. astroalign (triangle-matching), trying each of
+    ``ALIGN_ATTEMPTS``; 2. star-cloud ICP if astroalign fails.
+
+    Returns
+    -------
+    skimage.transform transform or None
+        Maps secondary pixel coordinates to reference pixel coordinates;
+        ``None`` if both methods fail (``align_to_reference`` then falls back
+        to the header WCS).
     """
-    try:
-        aligned, footprint = astroalign.register(sec_img, ref_img, detection_sigma=4, min_area=9)
-        aligned, footprint = reproject_adaptive((aligned, ref_wcs), ref_wcs, shape_out=np.shape(ref_img))
-    except Exception as e:
-        logger.warning(f"WARNING: Astroalign failed for {target} ({filtername}): {e}. Attempting star cloud alignment.")
+    for kwargs in ALIGN_ATTEMPTS:
         try:
-            aa_transform = star_cloud_alignment(ref_img, ref_header, ref_wcs, sec_img, sec_header, sec_wcs)
-            registered, footprint = astroalign.apply_transform(aa_transform, sec_img, ref_img)
-            aligned, footprint = reproject_adaptive((registered, ref_wcs), ref_wcs, shape_out=np.shape(ref_img))
-        except Exception:
-            logger.warning(f"WARNING: Star cloud alignment failed for {target} ({filtername}). Falling back to header WCS.")
-            aligned, footprint = reproject_adaptive((sec_img, sec_wcs), ref_wcs, shape_out=np.shape(ref_img))
+            transform, _ = astroalign.find_transform(sec_img, ref_img, **kwargs)
+            return transform
+        except Exception as e:
+            error = e
+    logger.warning(f"WARNING: Astroalign failed for {target} ({filtername}): {error}. Attempting star cloud alignment.")
+    try:
+        return star_cloud_alignment(ref_img, ref_header, ref_wcs, sec_img, sec_header, sec_wcs)
+    except Exception:
+        logger.warning(f"WARNING: Star cloud alignment failed for {target} ({filtername}). Falling back to header WCS.")
+        return None
+
+
+def align_to_reference(sec_img, sec_wcs, ref_img, ref_wcs, transform):
+    """Align a secondary-filter image onto the reference image's pixel grid,
+    with ``transform`` from ``find_transform_to_reference``, or with the
+    header WCS alone if that is ``None``."""
+    if transform is None:
+        aligned, footprint = reproject_adaptive((sec_img, sec_wcs), ref_wcs, shape_out=np.shape(ref_img))
+    else:
+        aligned, footprint = astroalign.apply_transform(transform, sec_img, ref_img)
     return aligned
+
+
+# ---------------------------------------------------------------------------
+# Hot-pixel and cosmic-ray removal (turned off with --no-clean). With only two
+# exposures per filter, the drizzle leaves many warm pixels and cosmic rays in
+# the DRC images. They land in one exposure of one filter, while real sources
+# appear in every filter, so an outlier with no counterpart in any other
+# filter is removed. Tuned with test_hotpixel.py on DW0317M4142 (WFC3) and
+# DW0132P1422 (ACS).
+# ---------------------------------------------------------------------------
+CLEAN_DETECT_SIGMA = 4.0   # outliers above this (residual from the local median) are candidates
+CLEAN_GROW_SIGMA   = 2.0   # candidates grow into connected pixels above this
+CLEAN_MATCH_SIGMA  = 2.5   # another filter above this within CLEAN_MATCH_BOX -> real source
+CLEAN_MATCH_BOX    = 3     # tolerance (px) for sub-pixel misalignment between filters
+CLEAN_MATCH_FRAC   = 0.15  # ...and that filter's peak within CLEAN_PEAK_BOX must reach this
+CLEAN_PEAK_BOX     = 5     #    fraction of this filter's peak (in sigma), else no real source
+CLEAN_MEDIAN_BOX   = 5     # local-median box (px) for the residual map
+CLEAN_FILL_SIGMA   = 1.5   # Gaussian kernel (px) used to fill removed pixels
+
+
+def _significance(img, good, std=None):
+    """Residual from the local median, in units of ``std``: by default the
+    clipped std of the residual over ``good`` pixels.  Returns (significance, std)."""
+    residual = img - median_filter(img, size=CLEAN_MEDIAN_BOX)
+    if std is None:
+        _, _, std = sigma_clipped_stats(residual[good], sigma=3)
+    return residual / std, std
+
+
+def _no_counterpart(sig_self, sig_other):
+    """Pixels with no counterpart in the other filter: either nothing significant
+    within CLEAN_MATCH_BOX, or nothing bright enough nearby to match this
+    filter's peak (no real source is that extreme in colour; hot pixels and
+    cosmic rays often land next to a faint source in the other filter)."""
+    faint   = maximum_filter(sig_other, size=CLEAN_MATCH_BOX) < CLEAN_MATCH_SIGMA
+    extreme = (maximum_filter(sig_other, size=CLEAN_PEAK_BOX)
+               < CLEAN_MATCH_FRAC * maximum_filter(sig_self, size=CLEAN_PEAK_BOX))
+    return faint | extreme
+
+
+def _fill_masked(img, mask, good):
+    """Replace masked pixels with the Gaussian-weighted mean of the unmasked
+    good pixels around them (normalized convolution)."""
+    weight = (good & ~mask).astype(float)
+    num    = gaussian_filter(img * weight, CLEAN_FILL_SIGMA)
+    den    = gaussian_filter(weight, CLEAN_FILL_SIGMA)
+    result = img.copy()
+    result[mask] = num[mask] / np.maximum(den[mask], 1e-6)
+    return result
+
+
+def _isolated_rejected(img, weight):
+    """On-chip pixels with zero weight (every exposure rejected), except the
+    strips of them along the chip edges and gap, which are coverage edges
+    rather than artifacts: filling those in one filter but not another would
+    leave single-colour fringes."""
+    finite   = np.isfinite(img)
+    rejected = finite & (weight == 0)
+    edges    = binary_propagation(binary_dilation(~finite) & rejected, mask=rejected)
+    return rejected & ~edges
+
+
+def remove_artifacts(images, weights, transforms, logger):
+    """Remove hot pixels and cosmic rays from each filter's image, in its own
+    pixel grid.
+
+    Every other filter is warped onto this filter's grid. Pixels more than
+    ``CLEAN_DETECT_SIGMA`` above the local median that have no counterpart in
+    any other filter are flagged, grown into connected pixels above
+    ``CLEAN_GROW_SIGMA`` (cosmic-ray tracks, drizzle spill-over) and by one
+    more pixel, then filled from the unflagged pixels around them. Pixels
+    where another filter has no data are never flagged. Isolated on-chip
+    pixels with zero weight (every exposure rejected) are filled too.
+    Non-finite (off-chip) pixels are left as they are.
+
+    Parameters
+    ----------
+    images : dict
+        ``{filtername: (img, header, wcs)}`` as loaded from the DRC files.
+    weights : dict
+        ``{filtername: WHT array}``.
+    transforms : dict
+        ``{filtername: transform}`` from each filter's pixel grid to the
+        reference grid (identity for the reference filter); these must be
+        accurate to a pixel or so, or real sources lose their counterparts.
+    logger : logging.Logger
+
+    Returns
+    -------
+    dict
+        ``{filtername: cleaned img}``, same shape and dtype as the input.
+    """
+    data, good, sig = {}, {}, {}
+    for f, (img, _, _) in images.items():
+        finite  = np.isfinite(img)
+        data[f] = np.where(finite, img, 0.0).astype(float)
+        good[f] = finite & (weights[f] > 0)
+        sig[f], _ = _significance(data[f], good[f])
+
+    eight = np.ones((3, 3), bool)
+    cleaned = {}
+    for f, (img, _, _) in images.items():
+        lonely = good[f].copy()
+        for g in images:
+            if g == f:
+                continue
+            g_to_f = transforms[g] + transforms[f].inverse
+            warped, _ = astroalign.apply_transform(g_to_f, data[g], data[f], fill_value=0)
+            cover, _  = astroalign.apply_transform(g_to_f, good[g].astype(float), data[f], fill_value=0)
+            covered   = cover > 0.5
+            sig_g, _  = _significance(warped, good[f] & covered)
+            lonely &= covered & _no_counterpart(sig[f], sig_g)
+
+        seeds = (sig[f] > CLEAN_DETECT_SIGMA) & lonely
+        grow  = (sig[f] > CLEAN_GROW_SIGMA) & lonely
+        mask  = binary_propagation(seeds, structure=eight, mask=grow)
+        mask  = binary_dilation(mask, structure=eight) & lonely
+        mask |= _isolated_rejected(img, weights[f])
+
+        filled = _fill_masked(data[f], mask, good[f])
+        cleaned[f] = img.copy()
+        cleaned[f][mask] = filled[mask]
+        logger.info(f'{f}: {seeds.sum()} outlier pixels with no counterpart in the other filter(s); '
+                    f'{mask.sum()} pixels ({100 * mask.mean():.1f}%) filled, including their surroundings.')
+    return cleaned
 
 
 def _normalize_channel(img):
@@ -390,6 +546,7 @@ def _process_target(eff_data_dir, eff_out_dir, target):
 
 
     images = {}
+    weights = {}
     for filtername in filters:
         imgpath = os.path.join(target_dir, filterdrizimg[filtername]+'.fits')
         hdu = fits.open(imgpath)
@@ -397,8 +554,36 @@ def _process_target(eff_data_dir, eff_out_dir, target):
         img = hdu[1].data
         img = img.view(img.dtype.newbyteorder()).byteswap()  # native byte order for astroalign/cv2
         wcs = WCS(header)
+        weights[filtername] = hdu['WHT'].data
         hdu.close()
         images[filtername] = (img, header, wcs)
+
+
+    # Transform from every filter's pixel grid to the reddest (reference)
+    # filter's.
+    ref_filter = filters[0]
+    ref_img, ref_header, ref_wcs = images[ref_filter]
+    transforms = {ref_filter: SimilarityTransform()}
+    for filtername in filters[1:]:
+        sec_img, sec_header, sec_wcs = images[filtername]
+        transforms[filtername] = find_transform_to_reference(
+            sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wcs, target, filtername, logger)
+
+
+    # Remove hot pixels and cosmic rays, each filter in its own pixel grid. This
+    # needs every filter's transform to within a pixel or so, which the header
+    # WCS alone is not always (6 px off between the filters of DW0317M4142).
+    if args.no_clean:
+        logger.info('Hot pixels and cosmic rays not removed (--no-clean).')
+    elif any(transform is None for transform in transforms.values()):
+        logger.warning(f'WARNING: Hot pixels and cosmic rays not removed for {target}: some filter '
+                       f'could only be aligned by its header WCS, which is not accurate enough to '
+                       f'match sources between filters.')
+    else:
+        logger.info('Removing hot pixels and cosmic rays.')
+        cleaned = remove_artifacts(images, weights, transforms, logger)
+        images = {f: (cleaned[f], h, w) for f, (_, h, w) in images.items()}
+        ref_img = images[ref_filter][0]
 
 
     # Save one greyscale PNG per filter, each in its own native pixel/WCS frame.
@@ -419,13 +604,11 @@ def _process_target(eff_data_dir, eff_out_dir, target):
 
     # Align every non-reference filter onto the reddest (reference) filter's
     # pixel grid.
-    ref_filter = filters[0]
-    ref_img, ref_header, ref_wcs = images[ref_filter]
     aligned = {ref_filter: ref_img}
     for filtername in filters[1:]:
         sec_img, sec_header, sec_wcs = images[filtername]
-        aligned[filtername] = align_to_reference(
-            sec_img, sec_header, sec_wcs, ref_img, ref_header, ref_wcs, target, filtername, logger)
+        aligned[filtername] = align_to_reference(sec_img, sec_wcs, ref_img, ref_wcs,
+                                                 transforms[filtername])
 
 
     if len(filters) == 2:
