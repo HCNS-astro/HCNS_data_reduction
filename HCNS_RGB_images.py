@@ -6,7 +6,9 @@ filters, removes hot pixels and cosmic rays (outliers with no counterpart in
 any other filter; ``--no-clean`` turns this off), aligns the blue-filter image
 to the red-filter frame (trying astroalign first, then a star-cloud ICP method,
 then WCS-only reprojection), and saves a three-colour composite PNG alongside
-individual greyscale PNGs.
+individual greyscale PNGs. The composite has the same colour stretch for every
+target, on a fixed surface-brightness scale, so that the images of different
+targets are directly comparable.
 
 Targets are processed in parallel, ``--ncpu`` at a time. Each target's log
 messages are written as one block when it finishes, and a target that fails is
@@ -27,13 +29,14 @@ from astropy.io import fits
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from astropy.visualization import ImageNormalize, ZScaleInterval, LinearStretch, make_rgb, ManualInterval
+from astropy.visualization import (ImageNormalize, ZScaleInterval, LinearStretch, AsinhStretch,
+                                   make_rgb, ManualInterval)
 from astropy.wcs import WCS
 from reproject import reproject_adaptive
 import astroalign
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
-from astropy.wcs.utils import pixel_to_skycoord
+from astropy.wcs.utils import pixel_to_skycoord, proj_plane_pixel_area
 import astropy.units as u
 from scipy.spatial import KDTree
 from scipy.ndimage import (median_filter, maximum_filter, gaussian_filter,
@@ -367,14 +370,42 @@ def remove_artifacts(images, weights, transforms, logger):
     return cleaned
 
 
-def _normalize_channel(img):
-    """Normalize a single image to [0, 1] via the same ZScale stretch used
-    for the greyscale outputs, so channels with different native flux
-    scales combine without a color cast."""
-    interval = ZScaleInterval(contrast=0.35, max_iterations=5)
-    vmin, vmax = interval.get_limits(img)
-    norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=LinearStretch(), clip=True)
-    return norm(img)
+# ---------------------------------------------------------------------------
+# RGB colour stretch, the same for every target so that the images are directly
+# comparable (if one galaxy looks brighter than another, it is). Each filter is
+# converted to surface brightness, f_lambda per arcsec^2, in units of
+# RGB_SB_UNIT: the typical sky noise of the HCNS images (F606W and F814W, ACS
+# and WFC3 are all within 25% of it, so the sky looks alike in every image and
+# its noise is close to grey). An asinh stretch then maps RGB_BLACK..RGB_WHITE
+# to 0..1: the sky (0) goes to 0.06, 5 units to 0.45, and RGB_WHITE (about
+# 20 AB mag/arcsec^2 at 7000 A) to white. Finally the colour saturation is
+# boosted by RGB_SATURATION. Chosen by comparing stretches on the HCNS targets
+# and a 3-filter ACS field.
+# ---------------------------------------------------------------------------
+RGB_SB_UNIT    = 4.4e-19  # erg/s/cm^2/A/arcsec^2
+RGB_BLACK      = -0.449   # in RGB_SB_UNIT
+RGB_WHITE      = 50       # in RGB_SB_UNIT
+RGB_SOFTENING  = 1.855    # in RGB_SB_UNIT: the stretch is linear below this, logarithmic above
+RGB_SATURATION = 1.6
+
+
+def _surface_brightness(img, header):
+    """Sky-subtracted surface brightness of an image, in units of RGB_SB_UNIT.
+
+    ``header`` is the image's own SCI header (PHOTFLAM and the native pixel
+    size; an aligned image keeps its native values per pixel). Non-finite
+    (off-chip) pixels are set to the sky level."""
+    finite = np.isfinite(img) & (img != 0)
+    _, sky, _ = sigma_clipped_stats(img[finite][::7], sigma=3, maxiters=10)
+    pixel_area = proj_plane_pixel_area(WCS(header)) * 3600 ** 2   # deg^2 -> arcsec^2
+    sb = (img - sky) * header['PHOTFLAM'] / pixel_area / RGB_SB_UNIT
+    return np.where(np.isfinite(sb), sb, 0.0)
+
+
+def _boost_saturation(rgb, factor):
+    """Scale each pixel's departure from grey (the mean of its channels) by ``factor``."""
+    grey = rgb.mean(axis=-1, keepdims=True)
+    return np.clip(grey + factor * (rgb - grey), 0, 1)
 
 
 def make_logger(name, filename, level=logging.INFO):
@@ -611,20 +642,16 @@ def _process_target(eff_data_dir, eff_out_dir, target):
                                                  transforms[filtername])
 
 
+    # Red to blue, on the fixed surface-brightness scale (see RGB_SB_UNIT).
+    channels = [_surface_brightness(aligned[f], images[f][1]) for f in filters]
     if len(filters) == 2:
-        R, B = aligned[filters[0]], aligned[filters[1]]
         # Green channel synthesised as the average of red and blue since only
         # two science filters are available.
-        G = 0.5 * (R + B)
-        RGB_img = make_rgb(R, G, B, interval=ManualInterval(vmin=0, vmax=0.03))
-    else:
-        R, G, B = aligned[filters[0]], aligned[filters[1]], aligned[filters[2]]
-        # Each filter has its own native flux scale (throughput, exposure
-        # time, sometimes instrument); normalize independently before
-        # compositing so relative brightness differences don't appear as a
-        # color cast.
-        RGB_img = make_rgb(_normalize_channel(R), _normalize_channel(G), _normalize_channel(B),
-                           interval=ManualInterval(vmin=0, vmax=1))
+        channels.insert(1, 0.5 * (channels[0] + channels[1]))
+    RGB_img = make_rgb(*channels, interval=ManualInterval(vmin=RGB_BLACK, vmax=RGB_WHITE),
+                       stretch=AsinhStretch(a=RGB_SOFTENING / (RGB_WHITE - RGB_BLACK)),
+                       output_dtype=np.float64)
+    RGB_img = _boost_saturation(RGB_img, RGB_SATURATION)
 
     fig = plt.figure(figsize=(15,15))
     ax = plt.subplot(projection=ref_wcs)
