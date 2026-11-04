@@ -1,4 +1,4 @@
-import os, sys, glob, numpy, argparse
+import os, sys, re, glob, numpy, argparse
 import shutil, subprocess, logging, warnings, time, textwrap
 from astropy.io import fits
 from joblib import Parallel, delayed
@@ -314,11 +314,39 @@ def _set_alignment(dolphot_dir, ref_rootname, align_level):
     out.append(f"Align = {align_level}\nRotate = 1\nUseWCS = 1\nAlignOnly = 1")
     _write_atomic(path, ''.join(out))
 
-def align_dolphot(target, reduct_dir, logger, instrument=None):
+# Alignment checks. Normally every image needs a per-star scatter (dolphot's
+# "sig") of at most ALIGN_MAX_SIG px and at least ALIGN_MIN_STARS matched stars.
+# When every alignment attempt fails that, the first attempt is run once more and
+# judged by the precision of each image's alignment instead: sparse chips can
+# match few stars and crowded ones scatter more, yet still be well aligned.
+# Then every image needs sig / sqrt(stars used) of at most ALIGN_MAX_PRECISION px
+# from at least ALIGN_MIN_USED stars, and the chips of each exposure (which share
+# its pointing) need shifts that agree within ALIGN_MAX_CHIP_OFFSET px.
+ALIGN_MAX_SIG = 0.75
+ALIGN_MIN_STARS = 15
+ALIGN_MAX_PRECISION = 0.1
+ALIGN_MIN_USED = 6
+ALIGN_MAX_CHIP_OFFSET = 0.3
+
+
+def _exposure_images(dolphot_dir):
+    """Image numbers of each exposure's chips, from phot_pars: {rootname: [N, ...]}."""
+    with open(os.path.join(dolphot_dir, 'phot_pars')) as f:
+        files = re.findall(r'^img(\d+)_file=(\S+)', f.read(), flags=re.M)
+    exposures = {}
+    for number, name in files:
+        if int(number) > 0:
+            exposures.setdefault(name.rsplit('.chip', 1)[0], []).append(int(number))
+    return exposures
+
+
+def align_dolphot(target, reduct_dir, logger, instrument=None, by_precision=False):
     """Run dolphot in alignment-only mode and validate the result.
 
     Alignment is considered successful if every per-image sigma value is
-    below 0.75 *and* every matched-star count is at least 15.
+    at most ALIGN_MAX_SIG *and* every matched-star count is at least
+    ALIGN_MIN_STARS. With ``by_precision``, it is judged by the precision of
+    each image's alignment instead (see ALIGN_MAX_PRECISION).
 
     Parameters
     ----------
@@ -330,6 +358,9 @@ def align_dolphot(target, reduct_dir, logger, instrument=None):
         Logger for dolphot output.
     instrument : str, optional
         Instrument name; must contain ``"ACS"`` or ``"WFC3"``.
+    by_precision : bool, optional
+        Judge the alignment by its precision rather than by the per-star
+        scatter and star count. Default is ``False``.
 
     Returns
     -------
@@ -348,28 +379,42 @@ def align_dolphot(target, reduct_dir, logger, instrument=None):
 
     result = subprocess.run(command, cwd=dolphot_dir, text=True, check=True, 
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
-    sig_values = []
-    n_stars_align = []
+    # One line per image, e.g. "image 1: 14 matched, 13 used, 5.26 4.16 1.000534
+    # 0.00000 -0.010, sig=0.15" (Align = 4 gives no shift, and adds ", rsig=...").
+    images = {}
     for line in result.stdout.splitlines():
         logger.info(line)
-        if "sig" in line:
-            inx1 = line.index("sig")
-            if "rsig" in line:
-                inx2 = line.index(", rsig")
-            else:
-                inx2 = len(line)
-            sig_values.append(float(line[inx1+4:inx2]))
-            inx1 = line.find("matched")
-            inx2 = line.find(" used")
-            n_stars_align.append(int(line[inx1+9:inx2]))
+        m = re.search(r'image (\d+): (\d+) matched, (\d+) used, (.*?)sig=([\d.]+)', line)
+        if m:
+            fit = m[4].replace(',', ' ').split()
+            images[int(m[1])] = dict(matched=int(m[2]), used=int(m[3]), sig=float(m[5]),
+                                     shift=(float(fit[0]), float(fit[1])) if len(fit) >= 2 else None)
         sys.stdout.flush()
+    sig_values = numpy.array([image['sig'] for image in images.values()])
+    n_matched = numpy.array([image['matched'] for image in images.values()])
 
-    # Either condition alone is sufficient to fail: a high sigma indicates a poor
-    # astrometric fit; too few matched stars makes the sigma itself unreliable.
-    if numpy.any(numpy.array(sig_values) > 0.75) or numpy.any(numpy.array(n_stars_align) < 15):
+    if not by_precision:
+        # Either condition alone is sufficient to fail: a high sigma indicates a poor
+        # astrometric fit; too few matched stars makes the sigma itself unreliable.
+        return not (numpy.any(sig_values > ALIGN_MAX_SIG) or numpy.any(n_matched < ALIGN_MIN_STARS))
+
+    if not images:
+        logger.info('Precision check: no alignment results found.')
         return False
-    else:
-        return True
+    n_used = numpy.array([image['used'] for image in images.values()])
+    precision = sig_values / numpy.sqrt(numpy.maximum(n_used, 1))
+    offsets = {}
+    for exposure, numbers in _exposure_images(os.path.join(reduct_dir, target)).items():
+        shifts = [images[n]['shift'] for n in numbers if n in images]
+        if len(shifts) > 1 and None not in shifts:
+            offsets[exposure] = max(numpy.hypot(a[0] - b[0], a[1] - b[1]) for a in shifts for b in shifts)
+    worst = max(offsets, key=offsets.get) if offsets else None
+    logger.info(f'Precision check: worst image precision {precision.max():.3f} px (limit '
+                f'{ALIGN_MAX_PRECISION}), fewest stars used {n_used.min()} (minimum {ALIGN_MIN_USED}), '
+                + (f'largest chip offset {offsets[worst]:.2f} px for {worst} (limit {ALIGN_MAX_CHIP_OFFSET}).'
+                   if worst else 'no chip offsets to compare.'))
+    return bool(numpy.all(precision <= ALIGN_MAX_PRECISION) and numpy.all(n_used >= ALIGN_MIN_USED)
+                and all(offset <= ALIGN_MAX_CHIP_OFFSET for offset in offsets.values()))
 
 def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=False, template_file=None):
     """Prepare all files and run the pre-photometry steps for dolphot.
@@ -378,7 +423,8 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
     to the reduction directory, write ``phot_pars``, mask detector edges, split
     multi-chip frames, calculate sky backgrounds (together "prep", marked
     complete by ``prep.done``), then run alignment with up to three retry
-    attempts (``align.done`` / ``align.failed``).
+    attempts, and if those all fail one more judged by its precision
+    (``align.done`` / ``align.failed``).
 
     Safe to stop and restart at any point: files are only written under their
     final names once complete, an unfinished prep is cleared and started again
@@ -664,6 +710,22 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
             if align_success:
                 break
             dolphot_logger.info(f'Alignment attempt {attempt} failed.')
+
+        if not align_success:
+            # Last resort: the first attempt's settings again, judged by the precision
+            # of each image's alignment instead (see ALIGN_MAX_PRECISION).
+            align_level, ref_rootname = attempts[0]
+            attempt = len(attempts) + 1
+            _set_alignment(dolphot_dir, ref_rootname, align_level)
+            dolphot_logger.info(f'Re-running alignment (attempt {attempt}: Align = {align_level}, '
+                                f'reference {ref_rootname}), judged by its precision.')
+            align_success = align_dolphot(target, reduct_dir, dolphot_logger, instrument=instrument,
+                                          by_precision=True)
+            if align_success:
+                global_logger.info(f'{target}: alignment passed only the precision check '
+                                   f'(attempt {attempt}).')
+            else:
+                dolphot_logger.info(f'Alignment attempt {attempt} failed.')
 
         if align_success:
             subprocess.run(["touch", "align.done"], cwd=dolphot_dir)
