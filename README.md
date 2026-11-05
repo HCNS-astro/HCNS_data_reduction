@@ -177,12 +177,23 @@ For each target with completed dolphot photometry:
   magnitude, crowding, sharpness).
 - Queries the SFD dust map for per-star extinction corrections.
 - Saves full-field and target-region (within 2 r_e of the HCNS sample
-  position) photometry catalogs and CMD plots.
+  position) photometry catalogs.
 - If AST results are available, fits completeness-limit curves as a function
   of F814W magnitude and F606W−F814W colour.
+- Plots `CMD_initial.pdf`: four panels, left to right the full field, the full
+  field with a 4σ S/N cut in each band, the target region, and the target
+  region with the cut. Each panel shows the matching 50% (dotted) and 90%
+  (dashed) completeness limits, shifted from the observed magnitudes they
+  were fitted in by the median extinction of the panel's stars. Targets
+  without a target-region catalog (not in the HCNS sample table) get the two
+  full-field panels only. The figure is remade whenever the catalogs or
+  completeness fits change.
 
 **Flags:**
 - `--overwrite` — reprocess outputs even if they already exist.
+- `--replot` — only remake `CMD_initial.pdf` from the existing `phot_*.csv`
+  and `completeness*.dat` files, leaving every other output untouched (e.g.
+  after a change to the plot). Cannot be combined with `--overwrite`.
 - `--ncpu` — number of targets processed simultaneously (default 10). Each
   holds its full photometry or AST catalog in memory, so lower this if
   memory runs short.

@@ -7,11 +7,14 @@ For each target with completed dolphot photometry, this script:
   photometry flags, magnitude, crowding, sharpness).
 * Queries the SFD dust map to compute per-star extinction corrections.
 * Saves a full-field and a target-region (within 2 r_e) photometry catalog.
-* Produces colour–magnitude diagrams as PDF figures.
+* Produces colour–magnitude diagrams as a PDF figure.
 
 If AST results are also available, the script fits completeness curves as a
-function of F814W magnitude and F606W–F814W colour and saves the parameters
-to ``completeness.dat``.
+function of F814W magnitude and F606W–F814W colour, saves the parameters
+to ``completeness.dat``, and draws them on the CMDs.
+
+``--replot`` only remakes ``CMD_initial.pdf`` from the existing catalogs and
+completeness fits.
 
 Targets are processed in parallel, ``--ncpu`` at a time. Each target's log
 messages are written as one block when it finishes, and a target that fails is
@@ -23,8 +26,10 @@ phot_full.csv
     Full-field extinction-corrected photometry catalog.
 phot_target_initial.csv
     Photometry within 2 r_e of the target centre.
-CMD_full.pdf, CMD_initial.pdf
-    Colour–magnitude diagrams.
+CMD_initial.pdf
+    Colour–magnitude diagrams of the full field and the target region, each
+    without and with a 4σ S/N cut, with the 50% and 90% completeness limits
+    (full field only for targets without a target-region catalog).
 phot_ast.csv
     Recovered fake-star catalog from ASTs.
 completeness.pdf, completeness.dat
@@ -64,7 +69,12 @@ parser.add_argument('--overwrite', action='store_true',
 parser.add_argument('--ncpu', type=int, default=10,
                     help='Number of targets processed simultaneously (default: 10). Each one holds its '
                          'full photometry or AST catalog in memory, so lower this if memory runs short.')
+parser.add_argument('--replot', action='store_true',
+                    help='Only remake CMD_initial.pdf from the existing phot_*.csv and completeness*.dat '
+                         'files, leaving every other output untouched.')
 args = parser.parse_args()
+if args.replot and args.overwrite:
+    parser.error('--replot cannot be combined with --overwrite.')
 
 code_dir = os.getcwd()
 data_dir = os.path.abspath(os.path.join(code_dir,'..','data'))
@@ -578,6 +588,103 @@ def _fit_completeness(fake_stars, blue_filter, red_filter, out_dir, target, suff
     plt.close()
 
 
+def _read_completeness(dat_file):
+    """Read the completeness-limit parameters written by ``_fit_completeness``.
+
+    Parameters
+    ----------
+    dat_file : str
+        Path to a ``completeness*.dat`` file.
+
+    Returns
+    -------
+    dict or None
+        ``{'comp50': [...], 'comp90': [...]}``, or ``None`` if the file does
+        not exist (no ASTs yet, or the fit failed).
+    """
+    if not os.path.isfile(dat_file):
+        return None
+    params = {}
+    with open(dat_file) as f:
+        for line in f:
+            name, _, values = line.partition('=')
+            params[name.strip()] = [float(v) for v in values.strip().strip('[]').split(',')]
+    return params
+
+
+def _completeness_limit(params, col):
+    """Completeness-limit magnitude at colour(s) ``col``, from the parameters
+    of either model fitted by ``_fit_completeness``: three for the
+    plateau-plus-parabola (``col_comp_func``), two for a straight line."""
+    if len(params) == 3:
+        return col_comp_func(col, *params)
+    return params[0]*col + params[1]
+
+
+def _plot_cmds(target_out_dir, target, blue_filter, red_filter):
+    """Save ``CMD_initial.pdf``: CMDs of the full field and of the target
+    region (``phot_target_initial.csv``), each without and then with a
+    4-sigma S/N cut in both bands, with the matching 50% (dotted) and 90%
+    (dashed) completeness limits. Targets without a target-region catalog
+    get the two full-field panels only.
+
+    The completeness limits were fitted in observed magnitudes, so they are
+    shifted into each panel's extinction-corrected frame using the median
+    extinction of the stars in that panel.
+
+    Parameters
+    ----------
+    target_out_dir : str
+        The target's output directory, holding its ``phot_*.csv`` and
+        ``completeness*.dat`` files.
+    target : str
+        Target name, for titles and log messages.
+    blue_filter, red_filter : str
+        Filters used for the colour and magnitude.
+    """
+    catalogs = [(f'{target} Full Field', pandas.read_csv(os.path.join(target_out_dir, 'phot_full.csv')))]
+    target_cat_file = os.path.join(target_out_dir, 'phot_target_initial.csv')
+    if os.path.isfile(target_cat_file):
+        catalogs.append((f'{target} (Initial)', pandas.read_csv(target_cat_file)))
+    else:
+        global_logger.info(f'No target catalog for {target}; CMD_initial.pdf shows the full field only.')
+
+    # Limits without (False) and with (True) the S/N cut.
+    limits = {}
+    for snr_cut, suffix in ((False, ''), (True, '_4sig')):
+        limits[snr_cut] = _read_completeness(os.path.join(target_out_dir, f'completeness{suffix}.dat'))
+        if limits[snr_cut] is None:
+            global_logger.info(f'No completeness{suffix}.dat for {target}; those limits are not drawn.')
+
+    col = numpy.linspace(-1, 2, 301)
+    fig, axes = plt.subplots(1, 2*len(catalogs), figsize=(8*len(catalogs), 8), sharey=True)
+    for i, (title, cat) in enumerate(catalogs):
+        for snr_cut, ax in zip((False, True), axes[2*i:2*i+2]):
+            panel_cat, panel_title = cat, title
+            if snr_cut:
+                # The same cut as the '_4sig' completeness fit.
+                panel_cat = cat[(cat[f'SNR_{blue_filter}'] >= 4) & (cat[f'SNR_{red_filter}'] >= 4)]
+                panel_title = r'w/ 4$\sigma$ S/N cut'
+            ax.scatter(panel_cat[f'{blue_filter}_0']-panel_cat[f'{red_filter}_0'], panel_cat[f'{red_filter}_0'],
+                       c='k', s=3, marker='o')
+            params = limits[snr_cut]
+            if params is not None and len(panel_cat) > 0:
+                a_red = numpy.median(panel_cat[f'A_{red_filter}'])
+                e_col = numpy.median(panel_cat[f'A_{blue_filter}']) - a_red
+                ax.plot(col, _completeness_limit(params['comp50'], col + e_col) - a_red, c='r', ls=':', lw=1)
+                ax.plot(col, _completeness_limit(params['comp90'], col + e_col) - a_red, c='r', ls='--')
+            ax.set_xlim(-1, 2)
+            ax.set_ylim(27.5, 20)
+            ax.set_title(panel_title)
+            ax.set_xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
+    axes[0].set_ylabel(f'{red_filter}$_0$')
+
+    cmd_file = os.path.join(target_out_dir, 'CMD_initial.pdf')
+    global_logger.info(f'Saving CMDs to {cmd_file}.')
+    fig.savefig(cmd_file, bbox_inches='tight')
+    plt.close(fig)
+
+
 def _load_hcns_sample():
     """Download the HCNS sample table and add each target's r_e in arcsec.
 
@@ -693,6 +800,19 @@ def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hc
     if os.path.isfile(columns_file):
         _, cat_filters, _ = _parse_dolphot_columns(columns_file)
         blue_filter = next((f for f in cat_filters if f != red_filter), None)
+
+    target_out_dir = os.path.join(eff_out_dir, target)
+    if args.replot:
+        if os.path.isfile(os.path.join(target_out_dir, 'phot_full.csv')):
+            if blue_filter is None:
+                global_logger.warning(f'Could not determine filters for {target} from {columns_file}. Skipping.')
+                return
+            _plot_cmds(target_out_dir, target, blue_filter, red_filter)
+        return
+
+    # Set when a catalog or completeness fit is (re)made, so that the CMDs
+    # are remade at the end.
+    changed = False
 
     if (os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")) and
             (not os.path.isfile(os.path.join(eff_out_dir, target, 'phot_target_initial.csv')) or args.overwrite)):
@@ -818,17 +938,7 @@ def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hc
         phot_outfile = os.path.join(eff_out_dir,target,'phot_full.csv')
         global_logger.info(f'Saving full FoV photometry catalog to {phot_outfile}.')
         dolphot_cat.to_csv(phot_outfile,index=False)
-
-
-        plt.figure(figsize=(4,8))
-        plt.scatter(dolphot_cat[f'{blue_filter}_0']-dolphot_cat[f'{red_filter}_0'], dolphot_cat[f'{red_filter}_0'],c='k',s=3,marker='o')
-        plt.ylim(27.5,20)
-        plt.xlim(-1,2)
-        plt.title(f'{target} Full Field')
-        plt.xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
-        plt.ylabel(f'{red_filter}$_0$')
-        plt.savefig(os.path.join(eff_out_dir,target,'CMD_full.pdf'),bbox_inches='tight')
-        plt.close()
+        changed = True
 
 
         # Select the sources within the (circular) 2*r_e of the target
@@ -847,16 +957,6 @@ def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hc
             phot_outfile = os.path.join(eff_out_dir,target,'phot_target_initial.csv')
             global_logger.info(f'Saving initial target photometry catalog to {phot_outfile}.')
             dolphot_cat.to_csv(phot_outfile,index=False)
-
-            plt.figure(figsize=(4,8))
-            plt.scatter(dolphot_cat[f'{blue_filter}_0']-dolphot_cat[f'{red_filter}_0'], dolphot_cat[f'{red_filter}_0'],c='k',s=3,marker='o')
-            plt.ylim(27.5,20)
-            plt.xlim(-1,2)
-            plt.title(f'{target} (Initial)')
-            plt.xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
-            plt.ylabel(f'{red_filter}$_0$')
-            plt.savefig(os.path.join(eff_out_dir,target,'CMD_initial.pdf'),bbox_inches='tight')
-            plt.close()
         except:
             global_logger.warning(f'{target} could not be match to HCNS sample table. No target CMD will be produced.')
 
@@ -885,6 +985,7 @@ def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hc
         _fit_completeness(fake_stars, blue_filter, red_filter, eff_out_dir, target)
         _fit_completeness(fake_stars, blue_filter, red_filter, eff_out_dir, target,
                           suffix='_4sig', min_snr=4, plateau50=True)
+        changed = True
 
     elif not os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")):
         global_logger.info(f'Photometry for {target} incomplete. Skipping.')
@@ -919,6 +1020,10 @@ def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hc
                           log_suffix=' (full AST catalog)')
         _fit_completeness(fake_stars_full, blue_filter, red_filter, eff_out_dir, target,
                           suffix='_4sig', min_snr=4, log_suffix=' (full AST catalog)', plateau50=True)
+        changed = True
+
+    if changed and os.path.isfile(os.path.join(target_out_dir, 'phot_full.csv')):
+        _plot_cmds(target_out_dir, target, blue_filter, red_filter)
 
 
 def _run_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hcns_sample):
@@ -960,7 +1065,7 @@ def _run_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hcns_s
     return target, label, collector.records, ok
 
 
-hcns_sample = _load_hcns_sample()
+hcns_sample = None if args.replot else _load_hcns_sample()
 
 global_logger.info(f'Processing {len(all_targets)} target(s), up to {args.ncpu} at a time.')
 failed = []
