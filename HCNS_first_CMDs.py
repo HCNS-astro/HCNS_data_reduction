@@ -657,7 +657,7 @@ def _plot_cmds(target_out_dir, target, blue_filter, red_filter):
             global_logger.info(f'No completeness{suffix}.dat for {target}; those limits are not drawn.')
 
     col = numpy.linspace(-1, 2, 301)
-    fig, axes = plt.subplots(1, 2*len(catalogs), figsize=(8*len(catalogs), 8), sharey=True)
+    fig, axes = plt.subplots(1, 2*len(catalogs), figsize=(9*len(catalogs), 8), sharey=True)
     for i, (title, cat) in enumerate(catalogs):
         for snr_cut, ax in zip((False, True), axes[2*i:2*i+2]):
             panel_cat, panel_title = cat, title
@@ -672,10 +672,10 @@ def _plot_cmds(target_out_dir, target, blue_filter, red_filter):
                 a_red = numpy.median(panel_cat[f'A_{red_filter}'])
                 e_col = numpy.median(panel_cat[f'A_{blue_filter}']) - a_red
                 ax.plot(col, _completeness_limit(params['comp50'], col + e_col) - a_red, c='r', ls=':', lw=1)
-                ax.plot(col, _completeness_limit(params['comp90'], col + e_col) - a_red, c='r', ls='--')
+                ax.plot(col, _completeness_limit(params['comp90'], col + e_col) - a_red, c='r', ls='--', lw=1)
             ax.set_xlim(-1, 2)
             ax.set_ylim(27.5, 20)
-            ax.set_title(panel_title)
+            ax.set_title(panel_title, fontsize=18)
             ax.set_xlabel(f'{blue_filter}$_0$ - {red_filter}$_0$')
     axes[0].set_ylabel(f'{red_filter}$_0$')
 
