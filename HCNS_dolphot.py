@@ -1089,6 +1089,27 @@ def _run_extra_ast_if_ready(path, reduct_dir, iteration):
         run_dolphot(target, reduct_dir, fake_stars=True, iteration=iteration)
 
 
+# The dolphot tools this script runs. They are called by name, so the versions used
+# are whichever come first on the PATH.
+DOLPHOT_TOOLS = ['dolphot', 'acsmask', 'wfc3mask', 'splitgroups', 'calcsky', 'fakelist']
+
+
+def _log_dolphot_tools():
+    """Log the full path of each dolphot tool on the PATH (and where it links to),
+    with a warning if any is missing or they come from different directories."""
+    tool_dirs = set()
+    for name in DOLPHOT_TOOLS:
+        path = shutil.which(name)
+        if path is None:
+            global_logger.warning(f'{name} not found on the PATH.')
+            continue
+        real = os.path.realpath(path)
+        tool_dirs.add(os.path.dirname(real))
+        global_logger.info(f'Using {name}: {path}' + (f' (links to {real})' if real != path else ''))
+    if len(tool_dirs) > 1:
+        global_logger.warning(f'The dolphot tools come from different directories: {", ".join(sorted(tool_dirs))}.')
+
+
 #Execute functions
 if args.archival:
     _log_filename = "HCNS_dolphot_archival.log"
@@ -1107,6 +1128,7 @@ if args.ast:
 else:
     global_logger.info('Using FLT exposures with dolphot\'s CTE correction (--flt).' if CTE else
                        'Using FLC exposures (CTE-corrected by the STScI pipeline).')
+_log_dolphot_tools()
 
 # The list of targets with data newer than their photometry, here and again at the end of the run.
 _write_stale_list()

@@ -98,6 +98,12 @@ tests (ASTs).
   than their photometry (see **Data newer than the photometry** below).
   Cannot be combined with `--ast`.
 
+**dolphot build.** The dolphot tools (`dolphot`, `acsmask`, `wfc3mask`,
+`splitgroups`, `calcsky`, `fakelist`) are run by name, so the versions used are
+whichever come first on the `PATH`. Every run logs their full paths at the
+start, with a warning if any is missing or they come from different
+directories: check these when more than one dolphot build is installed.
+
 **Exposures.** By default dolphot is run on the FLC exposures, which the
 STScI pipeline has already corrected for CTE, with `useCTE = 0`. With
 `--flt` it uses the FLT exposures and dolphot's own CTE correction
