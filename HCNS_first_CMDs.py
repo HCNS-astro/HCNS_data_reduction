@@ -774,6 +774,13 @@ def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hc
         global_logger.warning(f'No DRC files in {target_dir}; skipping {target} ({label}).')
         return
 
+    # Nothing to do until dolphot has finished this target's photometry: it may not
+    # have been reduced yet, may be held (HCNS_dolphot.py --hold-recent), or may have
+    # been skipped by HCNS_dolphot.py.
+    if not os.path.isfile(os.path.join(eff_reduct_dir, target, 'dolphot.done')):
+        global_logger.info(f'Photometry for {target} ({label}) not finished (no dolphot.done). Skipping.')
+        return
+
     os.makedirs(os.path.join(eff_out_dir, target), exist_ok=True)
     phot_pars_file = os.path.join(eff_reduct_dir, target, 'phot_pars')
     ref_rootname = None
@@ -986,9 +993,6 @@ def _process_target(eff_data_dir, eff_reduct_dir, eff_out_dir, target, label, hc
         _fit_completeness(fake_stars, blue_filter, red_filter, eff_out_dir, target,
                           suffix='_4sig', min_snr=4, plateau50=True)
         changed = True
-
-    elif not os.path.isfile(os.path.join(eff_reduct_dir, target, "dolphot.done")):
-        global_logger.info(f'Photometry for {target} incomplete. Skipping.')
 
     # Check for extra AST iterations produced by --ast mode in HCNS_dolphot.py
     extra_fake_files = sorted(
