@@ -1,0 +1,22 @@
+# Python, Jupyter and macOS files
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# Logs and status files written by the pipeline
+*.log
+HCNS_dolphot_stale.txt
+
+# Per-machine input (see README)
+HCNS_Archival_Dwarfs.tsv
+
+# Local test scripts, test results and scratch outputs
+test_*.py
+regen_test_dolphot_cmds.py
+version_tests/
+rgb_preview/
+*_hotpixel_test.png
+*.columns
+*.fake
+phot_full*.csv
