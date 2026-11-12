@@ -95,6 +95,21 @@ a newer HAP-association record for the same visit), only one of which has a
 `dataURL` that literally names the exposure — the row-level check alone can
 miss files that come through via the other record.
 
+**Files already downloaded** are checked against MAST on every run. MAST
+reprocesses data when STScI delivers new calibration reference files, such as
+the darks for the observation dates (typically 2–6 weeks after the
+observations), and the file size usually stays the same, so a size check would
+keep the old version. For each file already on disk, the script reads the
+archive copy's primary header (a ranged request, not a full download) and
+compares its processing time (`PROCTIME`), processing date, calibration
+context (`CRDS_CTX`) and software versions with the local copy's. A file that
+differs is downloaded again, under a temporary name that replaces the old file
+only once complete, and the change is logged, e.g.
+`PROCTIME 61342.1 -> 61353.80, CRDS_CTX hst_1368.pmap -> hst_1372.pmap`. The
+new files are newer than the photometry, so their targets appear in
+`HCNS_dolphot_stale.txt`, and `HCNS_dolphot.py --redo-stale` reduces them
+again. If MAST can't be reached, files are kept unless their size differs.
+
 Ctrl+C requests a graceful stop after the current target finishes; a second
 Ctrl+C forces an immediate exit.
 

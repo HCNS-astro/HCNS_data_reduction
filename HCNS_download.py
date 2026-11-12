@@ -9,6 +9,13 @@ and CALACS pipelines:
 * **FLT** – flat-fielded individual exposures, used when CTE correction is
   not applied (see ``CTE`` flag in ``HCNS_dolphot.py``).
 
+Files already downloaded are checked against MAST: if the archive copy has
+been reprocessed since (different processing time, calibration context or
+software version in its primary header), the new version is downloaded in its
+place. MAST reprocesses data when new calibration reference files, such as the
+darks for the observation date, are delivered, often weeks after the
+observations.
+
 Flags
 -----
 --targets
@@ -36,11 +43,14 @@ Outputs (archival mode)
 HCNS_archival_download.log
 """
 from astroquery.mast import Observations
+from astropy.io import fits
 from astropy.table import Table
+from concurrent.futures import ThreadPoolExecutor
 import argparse
 import os
 import signal
 import sys
+import requests
 import tqdm
 import numpy as np
 import pandas as pd
@@ -101,6 +111,93 @@ signal.signal(signal.SIGINT, _request_stop)
 
 
 # ---------------------------------------------------------------------------
+# Version check of files already downloaded
+# ---------------------------------------------------------------------------
+
+# MAST reprocesses files when STScI delivers new calibration reference files
+# (e.g. the darks for an observation date), often weeks after the observations
+# and usually without changing the file size, so astroquery's own check (by
+# size) keeps the old version. These primary-header keywords identify the
+# version instead: processing time (FLT/FLC only), processing date, calibration
+# context and software versions.
+VERSION_KEYS = ('PROCTIME', 'DATE', 'CRDS_CTX', 'CAL_VER', 'OPUS_VER', 'CSYS_VER')
+MAST_DOWNLOAD_URL = 'https://mast.stsci.edu/api/v0.1/Download/file'
+VERSION_CHECK_THREADS = 8
+
+
+def _version(header):
+    return {k: str(header[k]) for k in VERSION_KEYS if k in header}
+
+
+def _remote_version(uri, max_bytes=2880 * 1000):
+    """Version keywords of the archive copy of a product, read from the start of
+    the file only (MAST serves byte ranges): the primary header ends at its END card."""
+    data, pos = b'', 0
+    with requests.get(MAST_DOWNLOAD_URL, params={'uri': uri}, headers={'Range': f'bytes=0-{max_bytes - 1}'},
+                      stream=True, timeout=60) as response:
+        response.raise_for_status()
+        for chunk in response.iter_content(28800):
+            data += chunk
+            while pos + 80 <= len(data):
+                if data[pos:pos + 3] == b'END' and not data[pos + 3:pos + 80].strip():
+                    return _version(fits.Header.fromstring(data[:pos + 80].decode('ascii')))
+                pos += 80
+    raise ValueError(f'no END card in the first {len(data)} bytes')
+
+
+def _version_change(path, uri):
+    """Compare a local file with its archive copy: ``(True, changes)`` if MAST has
+    a different version, ``(False, '')`` if it is the same, or ``(None, reason)``
+    if the archive copy could not be checked."""
+    try:
+        remote = _remote_version(uri)
+    except Exception as e:
+        return None, f'could not read the archive copy ({e})'
+    try:
+        local = _version(fits.getheader(path, 0))
+    except Exception as e:
+        return True, f'local copy unreadable ({e})'
+    changes = [f'{k} {local.get(k)} -> {remote.get(k)}' for k in VERSION_KEYS if local.get(k) != remote.get(k)]
+    return bool(changes), ', '.join(changes)
+
+
+def _download_again(product, target_dir):
+    """Replace a local file with the archive's current version. It is downloaded
+    under a temporary name first, so a failed download leaves the old file in place."""
+    final = os.path.join(target_dir, product['productFilename'])
+    part = final + '.part'
+    status, msg, _ = Observations.download_file(product['dataURI'], local_path=part, cache=False)
+    if status == 'COMPLETE' and os.path.isfile(part):
+        os.replace(part, final)
+        return True
+    logging.error(f'{product["productFilename"]}: downloading the new version failed ({msg}); old file kept.')
+    if os.path.isfile(part):
+        os.remove(part)
+    return False
+
+
+def _update_reprocessed(target, target_dir, products):
+    """Download again any product already on disk that MAST has since reprocessed."""
+    existing = [p for p in products if os.path.isfile(os.path.join(target_dir, p['productFilename']))]
+    if not existing:
+        return
+    with ThreadPoolExecutor(VERSION_CHECK_THREADS) as pool:
+        results = list(pool.map(lambda p: _version_change(os.path.join(target_dir, p['productFilename']),
+                                                          p['dataURI']), existing))
+    n_new = 0
+    for product, (changed, detail) in zip(existing, results):
+        name = product['productFilename']
+        if changed is None:
+            logging.warning(f'{target}: {name}: {detail}; kept, unless its size differs.')
+        elif changed:
+            logging.info(f'{target}: {name}: MAST has a new version ({detail}); downloading it again.')
+            n_new += _download_again(product, target_dir)
+    if n_new:
+        tqdm.tqdm.write(f'{target}: {n_new} file(s) reprocessed by MAST since they were downloaded; '
+                        f'new versions downloaded.')
+
+
+# ---------------------------------------------------------------------------
 # Shared download helper
 # ---------------------------------------------------------------------------
 
@@ -137,6 +234,9 @@ def _download_target(target, target_dir, target_obs, exclude=()):
             # Created only once there is something to download, so a target
             # whose products were all excluded doesn't leave an empty dir.
             os.makedirs(target_dir, exist_ok=True)
+            # Files already here are replaced if MAST has reprocessed them; astroquery
+            # then downloads any that are missing (or whose size differs) and skips the rest.
+            _update_reprocessed(target, target_dir, products)
             Observations.download_products(products, download_dir=target_dir, flat=True)
 
 
