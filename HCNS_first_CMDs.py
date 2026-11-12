@@ -694,7 +694,7 @@ def _load_hcns_sample():
         Sample table indexed by upper-case target name, or ``None`` if the
         download failed (no target-region catalogs or CMDs can then be made).
     """
-    google_sheet_id = '1MFvVh57tIhzc6vUUmrCvDwyYzSojJTZtpqzXfRgC48s'
+    google_sheet_id = '1lsoONcIf1X_LWHUwfktuWNVAg2whnhH9tc9s0fjhQ84'
     sample_url = f"https://docs.google.com/spreadsheets/d/{google_sheet_id}/export?format=csv"
     try:
         hcns_sample = pandas.read_csv(sample_url, skiprows=[1])

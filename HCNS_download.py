@@ -172,7 +172,7 @@ if args.archival:
         logging.info(f'archival_name_map.list: {len(name_map)} name mapping(s) loaded.')
 
     # Load HCNS sample table for cross-matching
-    google_sheet_id = '1MFvVh57tIhzc6vUUmrCvDwyYzSojJTZtpqzXfRgC48s'
+    google_sheet_id = '1lsoONcIf1X_LWHUwfktuWNVAg2whnhH9tc9s0fjhQ84'
     sample_url = f"https://docs.google.com/spreadsheets/d/{google_sheet_id}/export?format=csv"
     hcns_sample = pd.read_csv(sample_url, skiprows=[1])
     hcns_sample['Name'] = hcns_sample['Name'].str.upper()
