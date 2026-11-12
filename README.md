@@ -15,6 +15,28 @@ All four operate on the same set of targets and expect to be run in this
 order from within `HCNS_data_reduction/`, with sibling `data/`, `reduction/`
 and `output/` directories one level up.
 
+## Environment
+
+The Python environment (Python 3.13) is defined in `environment.yml`. Create
+and activate it with conda, from this directory:
+
+```
+conda env create -f environment.yml
+conda activate HCNS
+```
+
+`HCNS_first_CMDs.py` corrects for extinction with the SFD dust map from
+`dustmaps`, which has to be downloaded once per machine (the data directory is
+remembered in `~/.dustmapsrc`):
+
+```
+python -c "from dustmaps.config import config; config['data_dir'] = '/path/to/dustmaps'; import dustmaps.sfd; dustmaps.sfd.fetch()"
+```
+
+dolphot itself, with its ACS and WFC3 modules, PSF files and pixel area maps,
+is installed separately, not through conda; `HCNS_dolphot.py` runs its tools
+from the `PATH` (see **dolphot build** below). The HCNS pipeline used dolphot 2.0 (prior to the 2025 changes).
+
 ## Directory layout
 
 ```
@@ -130,20 +152,31 @@ time. This matters because most individual archival programs only have 1-2
 targets — without flattening, most of `--ncpu` would sit idle while a
 single-target program ran alone before moving to the next.
 
-**Filter selection.** dolphot's `fakelist` tool only supports two-band AST
-generation, so before any files are copied from the download directory,
-`prep_dolphot` selects exactly two filters: `F814W` is always the red
-anchor; the blue band is the first filter found, in order, from
-`BLUE_FILTER_PREFERENCE = ['F606W', 'F555W', 'F475W']` (defined near the top
-of the file — edit this list to add or reorder acceptable blue filters).
-Targets without both `F814W` and an acceptable blue filter are skipped. This
-means dolphot, and everything downstream, only ever sees two filters even
-when a target has 3+ bands of raw data.
+**Filter selection.** dolphot's `fakelist` tool only makes artificial stars in
+two bands, so before any files are copied `prep_dolphot` picks exactly two
+filters from the target's DRC images: `F814W` (`RED_FILTER`) is always the red
+band, and the blue band is the first of
+`BLUE_FILTER_PREFERENCE = ['F606W', 'F555W', 'F475W', 'F438W']` that has a DRC
+(`F438W` is WFC3 only). Both are defined near the top of the file; edit the
+list to add or reorder blue filters. Only those two filters' exposures and DRCs
+are copied and reduced, so dolphot, and everything downstream, sees two filters
+even when a target has data in more. Targets without `F814W` and one of the
+blue filters are skipped.
 
-**Alignment** retries up to 4 times with an escalating `Align` parameter
-(2 → 3 → 4 → 2-with-reference-switched-to-shortest-wavelength-filter),
-validated by requiring every per-image sigma ≤ 0.75 and every matched-star
-count ≥ 15.
+**Alignment** is run on its own (`AlignOnly = 1`) before the photometry, with
+the F814W DRC as the reference image. An attempt passes if every image has a
+per-star scatter (dolphot's `sig`) of at most 0.75 px and at least 15 matched
+stars (`ALIGN_MAX_SIG`, `ALIGN_MIN_STARS`). Failed attempts are retried with
+`Align = 3`, then `Align = 4`, then `Align = 2` with the blue filter's DRC as
+the reference. If all four fail, the first attempt is run once more and judged
+by the precision of each image's alignment instead, since sparse chips can
+match few stars and crowded ones scatter more yet still be well aligned: every
+image needs `sig` / √(stars used) of at most 0.1 px from at least 6 stars, and
+the two chips of each exposure must agree in shift to within 0.3 px
+(`ALIGN_MAX_PRECISION`, `ALIGN_MIN_USED`, `ALIGN_MAX_CHIP_OFFSET`). A target
+that passes gets `align.done`; one that fails all five attempts gets
+`align.failed` and is skipped from then on (manual alignment may be needed).
+An interrupted alignment starts again from the first attempt.
 
 **Marker files** (per target, in the reduction directory) gate each step so
 re-runs skip completed work: `prep.done` (copying, `phot_pars`, masking,
@@ -265,16 +298,6 @@ the middle-wavelength filter is used as a real green channel.
 All observation-ID list files use the same matching convention: each line is
 a substring checked (case-insensitively) against each MAST observation's
 `dataURL`. Empty files are valid (no exclusion/restriction applied).
-
-## Development / test scripts
-
-Not tracked in git — local scratch scripts for one-off comparisons:
-- `test_dolphot_versions.py` — runs the full pipeline independently under
-  two different dolphot binary versions (paths configured via
-  `DOLPHOT_BASE` near the top of the file) on a small target list, for
-  comparing output.
-- `test_hotpixel.py` — compares hot-pixel removal options for the RGB
-  composite images on a single target.
 
 ## Setup notes
 
