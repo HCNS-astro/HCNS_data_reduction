@@ -134,6 +134,14 @@ tests (ASTs).
 - `--redo-stale` — re-reduce from the start the targets whose data are newer
   than their photometry (see **Data newer than the photometry** below).
   Cannot be combined with `--ast`.
+- `--hold-recent [DAYS]` — skip targets whose newest exposure (`EXPEND` in
+  the FLC/FLT headers) is less than `DAYS` days old (default 45), as their
+  calibration is probably not final yet. STScI delivers the darks for an
+  observation date with the next batch, usually 4–6 weeks later (for ACS/WFC
+  and WFC3/UVIS since mid-2024, 90% within 43 days and all within 66), and
+  MAST then reprocesses the data. Held targets are logged with the date from
+  which they will be processed. Data reprocessed after that are still picked
+  up by `HCNS_download.py` and `--redo-stale`. Not used with `--ast`.
 
 **dolphot build.** The dolphot tools (`dolphot`, `acsmask`, `wfc3mask`,
 `splitgroups`, `calcsky`, `fakelist`) are run by name, so the versions used are

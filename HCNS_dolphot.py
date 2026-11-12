@@ -23,6 +23,16 @@ parser.add_argument('--redo-stale', action='store_true',
                          'photometry (those in HCNS_dolphot_stale.txt; archival targets with --archival): '
                          'their reduction directories, and the photometry outputs of HCNS_first_CMDs.py, '
                          'are moved to ../reduction/stale_superseded/ and ../output/stale_superseded/.')
+# Days after an observation by which its calibration is usually final: STScI delivers
+# the darks for an observation date with the next ones, typically 4-6 weeks later
+# (ACS/WFC and WFC3/UVIS, 2024-2026: 90% within 43 days), and MAST then reprocesses it.
+HOLD_DAYS = 45
+parser.add_argument('--hold-recent', nargs='?', type=float, const=HOLD_DAYS, default=None, metavar='DAYS',
+                    help=f'Hold off on targets whose newest exposure is less than DAYS days old (default '
+                         f'{HOLD_DAYS}), as their calibration is probably not final yet: STScI delivers the '
+                         f'darks for an observation date weeks later, and MAST then reprocesses the data. '
+                         f'Held targets are skipped in this run and logged with the date from which they '
+                         f'will be processed. Not used with --ast.')
 args = parser.parse_args()
 if args.ast and args.redo_stale:
     parser.error('--redo-stale cannot be combined with --ast; run it without --ast first.')
@@ -1001,6 +1011,28 @@ def _redo_stale(path, reduct_dir):
                           f'reducing it again with {kind} exposures.')
 
 
+def _held(path):
+    """``--hold-recent``: True (and logged) if the target's newest exposure ended
+    less than ``args.hold_recent`` days ago, from the EXPEND keyword (MJD) of its
+    FLC/FLT files, so its calibration is probably not final yet."""
+    ends = []
+    for f in glob.glob(os.path.join(path, '*_fl[ct].fits')):
+        try:
+            ends.append(float(fits.getval(f, 'EXPEND', 0)))
+        except Exception:
+            pass
+    if not ends:
+        return False
+    newest = max(ends)
+    age = time.time()/86400 + 40587 - newest   # days; MJD 40587 is the Unix epoch
+    if age >= args.hold_recent:
+        return False
+    day = lambda mjd: time.strftime('%Y-%m-%d', time.gmtime((mjd - 40587)*86400))
+    global_logger.info(f'{os.path.basename(path)}: held, as its newest exposure ({day(newest)}) is {age:.0f} '
+                       f'days old; it will be processed from {day(newest + args.hold_recent)}.')
+    return True
+
+
 def _prep_dolphot(path, data_dir, reduct_dir):
     """Joblib worker: prep dolphot for a single target if not already done.
 
@@ -1125,9 +1157,13 @@ N_CPU = args.ncpu
 CTE = args.flt
 if args.ast:
     global_logger.info("Extra ASTs use each target's existing parameter file (FLT or FLC as it was reduced).")
+    if args.hold_recent is not None:
+        global_logger.info('--hold-recent is not used with --ast.')
 else:
     global_logger.info('Using FLT exposures with dolphot\'s CTE correction (--flt).' if CTE else
                        'Using FLC exposures (CTE-corrected by the STScI pipeline).')
+    if args.hold_recent is not None:
+        global_logger.info(f'Holding targets observed less than {args.hold_recent:g} days ago (--hold-recent).')
 _log_dolphot_tools()
 
 # The list of targets with data newer than their photometry, here and again at the end of the run.
@@ -1155,6 +1191,8 @@ if args.archival:
                 delayed(_run_extra_ast_if_ready)(path, rdir, iteration)
                 for path, rdir in all_path_reduct)
     else:
+        if args.hold_recent is not None:
+            all_path_reduct = [(path, rdir) for path, rdir in all_path_reduct if not _held(path)]
         for path, rdir in all_path_reduct:
             if args.redo_stale:
                 _redo_stale(path, rdir)
@@ -1188,6 +1226,8 @@ else:
     global_logger.info(f'Running dolphot prep for all downloaded targets.')
     paths = [p for p in glob.glob(os.path.join(data_dir, "*"))
              if os.path.isdir(p) and os.path.basename(p) != 'archival']
+    if args.hold_recent is not None:
+        paths = [p for p in paths if not _held(p)]
 
     for path in paths:
         if args.redo_stale:
