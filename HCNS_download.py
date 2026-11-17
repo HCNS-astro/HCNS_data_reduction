@@ -201,16 +201,34 @@ def _update_reprocessed(target, target_dir, products):
 # Shared download helper
 # ---------------------------------------------------------------------------
 
+def _drop_bad_obs(obs, bad):
+    """Remove from ``obs`` the observation records whose dataURL contains a
+    bad-list entry, and return the names (lower case) of every file in those
+    records' product lists. The same files can also be listed under other
+    records of the visit (e.g. its HAP records, whose names don't contain the
+    excluded association ID), so ``_download_target`` excludes them by name."""
+    drop_inx = [i for i in range(len(obs)) if any(s.lower() in obs['dataURL'][i] for s in bad)]
+    files = set()
+    for i in drop_inx:
+        products = Observations.get_unique_product_list(str(obs['obsid'][i]))
+        files.update(name.lower() for name in products['productFilename'])
+    if drop_inx:
+        obs.remove_rows(drop_inx)
+        logging.info(f'Excluded {len(drop_inx)} bad observation record(s) and the {len(files)} file(s) listed '
+                     f'under them.')
+    return files
+
+
 def _download_target(target, target_dir, target_obs, exclude=()):
     """Download DRC, FLC and FLT products for one target.
 
     ``target_obs`` must already be filtered to the rows for this target.
-    ``exclude`` is an iterable of observation-ID substrings (e.g. from
-    bad_obs.list); any product whose filename contains one of these strings
-    is skipped.  This is needed in addition to any upstream row-level
-    filtering because MAST can expose the same exposure files as products of
-    a different (e.g. HAP-association) observation record whose dataURL
-    doesn't literally name the exposure.
+    ``exclude`` is an iterable of strings (bad-list entries, and the names of
+    the files listed under the bad records, from ``_drop_bad_obs``); any
+    product whose filename contains one of them is skipped.  This is needed in
+    addition to the row-level filtering because MAST can expose the same
+    exposure files as products of a different (e.g. HAP-association)
+    observation record whose dataURL doesn't literally name the exposure.
     """
     for obsid in set(target_obs['obsid']):
         product_list = Observations.get_unique_product_list(str(obsid))
@@ -316,12 +334,9 @@ if args.archival:
             if proj_id not in proj_obs_cache:
                 logging.info(f'Querying MAST for project {proj_id} (tsv-driven).')
                 proj_obs = Observations.query_criteria(proposal_id=[int(proj_id)], obs_collection='HST')
-                drop_inx = [i for i in range(len(proj_obs))
-                            if any(s.lower() in proj_obs['dataURL'][i] for s in archival_bad)]
-                if drop_inx:
-                    proj_obs.remove_rows(drop_inx)
-                proj_obs_cache[proj_id] = proj_obs
-            proj_obs = proj_obs_cache[proj_id]
+                bad_files = _drop_bad_obs(proj_obs, archival_bad)
+                proj_obs_cache[proj_id] = (proj_obs, list(archival_bad) + sorted(bad_files))
+            proj_obs, proj_exclude = proj_obs_cache[proj_id]
 
             keep_inx = [i for i in range(len(proj_obs))
                         if any(code in proj_obs['dataURL'][i] for code in codes)]
@@ -340,7 +355,7 @@ if args.archival:
             data_dir_tsv = os.path.abspath(os.path.join(code_dir, '..', 'data', 'archival', proj_id))
             os.makedirs(data_dir_tsv, exist_ok=True)
             _download_target(hcns_name, os.path.join(data_dir_tsv, hcns_name), row_obs,
-                             exclude=archival_bad)
+                             exclude=proj_exclude)
 
             if other_name.upper() != hcns_name.upper() and other_name.upper() not in existing_map_entries:
                 new_map_lines.append(f'{other_name.upper()}\t{hcns_name.upper()}\n')
@@ -364,11 +379,8 @@ if args.archival:
         obs = Observations.query_criteria(
             proposal_id=[int(proj_id)], obs_collection='HST')
 
-        # Apply bad-obs exclusions
-        drop_inx = [i for i in range(len(obs))
-                    if any(s.lower() in obs['dataURL'][i] for s in archival_bad)]
-        if drop_inx:
-            obs.remove_rows(drop_inx)
+        # Apply bad-obs exclusions, to the records and to the files listed under them
+        proj_exclude = list(archival_bad) + sorted(_drop_bad_obs(obs, archival_bad))
 
         # Normalise MAST target names: apply name map where available,
         # otherwise just uppercase.  This makes the cross-match case-insensitive
@@ -407,7 +419,7 @@ if args.archival:
             logging.info(f'Target: {target}')
             _download_target(target, os.path.join(data_dir, target),
                              obs[obs['target_name'] == str(target)],
-                             exclude=archival_bad)
+                             exclude=proj_exclude)
 
 
 # ---------------------------------------------------------------------------
@@ -422,16 +434,11 @@ else:
         proposal_id=[18061], obs_collection='HST',
         obs_title='Hubble Census of Nearby Satellites')
 
-    bad_obs_list = np.loadtxt('bad_obs.list', dtype='str')
+    bad_obs_list = np.loadtxt('bad_obs.list', dtype='str', ndmin=1)
     # Remove flagged observations before deduplicating targets so that no data
-    # from bad visits is downloaded, even if the target itself is otherwise valid.
-    drop_inx = []
-    for obs_str in bad_obs_list:
-        for i in range(len(HCNS_obs)):
-            if obs_str.lower() in HCNS_obs['dataURL'][i]:
-                drop_inx.append(i)
-    if len(drop_inx) > 0:
-        HCNS_obs.remove_rows(drop_inx)
+    # from bad visits is downloaded, even if the target itself is otherwise valid;
+    # the files listed under them are excluded by name too.
+    hcns_exclude = list(bad_obs_list) + sorted(_drop_bad_obs(HCNS_obs, bad_obs_list))
 
     if args.targets:
         good_obs_list = np.loadtxt('good_obs.list', dtype='str', ndmin=1)
@@ -452,4 +459,4 @@ else:
         logging.info(f'Target: {target}')
         _download_target(target, os.path.join(data_dir, target),
                          HCNS_obs[HCNS_obs['target_name'] == str(target)],
-                         exclude=bad_obs_list)
+                         exclude=hcns_exclude)

@@ -87,13 +87,15 @@ per target under `../data/`.
    `archival_targets.list` if non-empty.
 
 **Exclusion is applied twice** for robustness: once at the MAST observation-
-row level (cheap, filters most rows before any product-list query), and
-again at the individual product-filename level right before download. The
-second check is necessary because MAST can expose the same exposure through
-more than one observation record (e.g. a classic per-exposure record versus
-a newer HAP-association record for the same visit), only one of which has a
-`dataURL` that literally names the exposure — the row-level check alone can
-miss files that come through via the other record.
+row level, and again at the individual product-filename level right before
+download. The second check is necessary because MAST can expose the same
+exposure through more than one observation record (e.g. a classic
+association record versus the newer HAP records for the same visit), only one
+of which has a `dataURL` that names the excluded observation. It skips any
+file whose name contains a bad-list entry, and also every file listed under
+an excluded record, whichever record it comes through: an entry naming an
+association (e.g. `JFFV14010`) does not appear in the names of its member
+exposures (`jffv14z0q_flc.fits`, …), which the HAP records also list.
 
 **Files already downloaded** are checked against MAST on every run. MAST
 reprocesses data when STScI delivers new calibration reference files, such as
