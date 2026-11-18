@@ -100,6 +100,9 @@ def make_logger(name, filename, level=logging.INFO):
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
+    # Drop handlers left from an earlier use of this logger (e.g. a function that
+    # returned without closing it), so lines are never written twice.
+    close_logger(logger)
 
     formatter = logging.Formatter(
         "{asctime} - {levelname} - {message}",
@@ -485,7 +488,7 @@ def prep_dolphot(target, data_dir, reduct_dir, CTE=False, align_iter=5, verbose=
         global_logger.info(f'{dolphot_dir} created.')
 
     #Create log for dolphot run for this target
-    dolphot_logger = make_logger("dolphot", filename=os.path.join(dolphot_dir, f"{target}_dolphot.log"))
+    dolphot_logger = make_logger(f"dolphot:{dolphot_dir}", filename=os.path.join(dolphot_dir, f"{target}_dolphot.log"))
 
     #Find all raw files that were downloaded: exposures of the kind used (FLT or FLC),
     #and of the other kind, to check that none is missing
@@ -855,7 +858,7 @@ def run_dolphot(target, reduct_dir, fake_stars=False, verbose=False, iteration=N
     dolphot_dir = os.path.join(reduct_dir,target)
 
     #Open log for dolphot run for this target
-    dolphot_logger = make_logger("dolphot", filename=os.path.join(dolphot_dir, f"{target}_dolphot.log"))
+    dolphot_logger = make_logger(f"dolphot:{dolphot_dir}", filename=os.path.join(dolphot_dir, f"{target}_dolphot.log"))
 
     #Remove align only parameter
     with open(os.path.join(dolphot_dir,'phot_pars'), 'r') as file:
